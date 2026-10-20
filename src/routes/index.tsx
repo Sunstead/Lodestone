@@ -47,8 +47,6 @@ import {
   HomeIcon,
   MemoryStick,
   Network,
-  Play,
-  Plus,
   Puzzle,
   Settings,
   Terminal,
@@ -57,6 +55,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import backgroundImg from '@/assets/wallpaper/wallpaper_minecraft_pc_bundle_2560x1440.png';
+import Play from "@/assets/icons/play.svg?react";
+import Plus from "@/assets/icons/plus.svg?react";
 
 export const Route = createFileRoute('/')({ component: Home });
 
@@ -604,7 +604,7 @@ function Home() {
                 </div>
               </div>
 
-              <div className='sticky top-0 z-20 -mt-14 flex h-14 w-full items-stretch overflow-x-auto border-y bg-sidebar/80 backdrop-blur-md'>
+              <div className='sticky top-0 z-20 -mt-14 flex h-14 w-full items-stretch overflow-x-auto overflow-y-hidden border-y bg-sidebar/80 backdrop-blur-md'>
                 <SidebarTrigger className='mx-2 shrink-0 self-center' />
                 <Button
                   variant='ghost'

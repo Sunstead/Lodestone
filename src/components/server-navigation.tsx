@@ -101,7 +101,7 @@ export function ServerRibbon({
   return (
     <nav
       aria-label='Server pages'
-      className='flex min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden'
+      className='scrollbar-hidden flex min-w-0 flex-1 items-stretch overflow-x-auto overflow-y-hidden'
     >
       {SERVER_PAGES.map(({ id, label, icon: Icon }) => (
         <Button

@@ -548,9 +548,12 @@ function Home() {
             </Button>
           </ServerSidebar>
           <SidebarInset className='min-h-0! min-w-0 overflow-hidden'>
-            <div className='min-h-0 flex-1 overflow-y-auto overflow-x-hidden'>
+            <ScrollArea
+              key={page}
+              className='server-content-scroll-area min-h-0 flex-1'
+            >
               <ServerHero serverId={server} />
-              <div className='sticky top-0 z-20 -mt-14 flex h-14 min-w-0 items-stretch border-y bg-sidebar/80 backdrop-blur-md'>
+              <div className='sticky top-0 z-30 -mt-14 flex h-14 min-w-0 items-stretch border-y bg-sidebar/80 backdrop-blur-md'>
                 <SidebarTrigger
                   aria-label='Toggle sidebar'
                   className='mx-2 shrink-0 self-center'
@@ -562,7 +565,7 @@ function Home() {
               ) : (
                 <ServerPagePlaceholder page={page} />
               )}
-            </div>
+            </ScrollArea>
           </SidebarInset>
         </SidebarProvider>
       </ThemeProvider>

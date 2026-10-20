@@ -2,6 +2,14 @@
 @import '@sunstead/ui/styles.css';
 @source '../node_modules/@sunstead/ui/src';
 
+.scrollbar-hidden {
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
 @font-face {
   font-family: 'MC';
   src: url('./assets/fonts/MinecraftStandard.otf') format('opentype');
@@ -20,6 +28,14 @@
   --bevel-hover: 10%;
   --bevel-highlight-source: white;
   --bevel-shadow-source: black;
+}
+
+[data-slot='scroll-area-scrollbar'] {
+  z-index: 0;
+}
+
+.server-content-scroll-area > [data-slot='scroll-area-scrollbar'] {
+  z-index: 40;
 }
 
 @theme {

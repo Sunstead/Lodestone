@@ -8,6 +8,12 @@ import tailwindcss from '@tailwindcss/vite'
 
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
+  optimizeDeps: {
+    include: [
+      'use-sync-external-store/shim',
+      'use-sync-external-store/shim/with-selector',
+    ],
+  },
   plugins: [
     devtools(),
     tailwindcss(),

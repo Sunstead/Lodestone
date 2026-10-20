@@ -1,17 +1,72 @@
+@import 'tailwindcss';
+@import '@sunstead/ui/styles.css';
+@source '../node_modules/@sunstead/ui/src';
 
-@import "tailwindcss";
-
-* {
-  box-sizing: border-box;
+@font-face {
+  font-family: 'MC';
+  src: url('./assets/fonts/MinecraftStandard.otf') format('opentype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
 }
 
-html,
-body,
-#app {
-  min-height: 100%;
+:root {
+  --radius: 0;
+
+  /* Bevel tokens: tune the whole system from here */
+  --bevel-depth: 6px;
+  --bevel-highlight: 20%;
+  --bevel-shadow: 30%;
+  --bevel-hover: 10%;
+  --bevel-highlight-source: white;
+  --bevel-shadow-source: black;
 }
 
-body {
-  margin: 0;
+@theme {
+  --font-sans: 'Oxanium Variable', 'Inter', sans-serif;
+  --font-mc: 'MC', 'Inter', sans-serif;
+
+  --color-main: #15911f;
+  --color-gray: #808080;
+  --color-danger: #c0392b;
 }
 
+@utility bevel {
+  --bevel-base: var(--bevel-color, var(--color-main));
+  box-shadow:
+    inset 0 var(--bevel-depth) 0 0
+      color-mix(in srgb, var(--bevel-base), var(--bevel-highlight-source) var(--bevel-highlight)),
+    inset 0 calc(var(--bevel-depth) * -1) 0 0
+      color-mix(in srgb, var(--bevel-base), var(--bevel-shadow-source) var(--bevel-shadow));
+  transition: background-color 100ms, box-shadow 100ms, translate 100ms;
+
+  &:hover:not(:disabled) {
+    --bevel-base: color-mix(
+      in srgb,
+      var(--bevel-color, var(--color-main)),
+      var(--bevel-highlight-source) var(--bevel-hover)
+    );
+  }
+
+  /* Pressed: flip the bevel and nudge down */
+  &:active:not(:disabled) {
+    translate: 0 2px;
+    box-shadow:
+      inset 0 var(--bevel-depth) 0 0
+        color-mix(in srgb, var(--bevel-base), var(--bevel-shadow-source) var(--bevel-shadow)),
+      inset 0 calc(var(--bevel-depth) * -1) 0 0
+        color-mix(in srgb, var(--bevel-base), var(--bevel-highlight-source) var(--bevel-highlight));
+  }
+
+  &:disabled {
+    filter: saturate(0.5) brightness(0.8);
+  }
+}
+
+@utility bevel-main {
+  --bevel-color: var(--color-main);
+  --bevel-highlight-source: #ddff64;
+  --bevel-shadow-source: #002205;
+}
+@utility bevel-gray   { --bevel-color: var(--color-gray); }
+@utility bevel-danger { --bevel-color: var(--color-danger); }

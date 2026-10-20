@@ -1,4 +1,3 @@
-import { SidebarServerButton } from '#/components/sidebar-server-button';
 import { Avatar, AvatarFallback } from '@sunstead/ui/components/avatar';
 import { Badge } from '@sunstead/ui/components/badge';
 import { Button } from '@sunstead/ui/components/button';
@@ -11,15 +10,8 @@ import {
 } from '@sunstead/ui/components/card';
 import { Progress } from '@sunstead/ui/components/progress';
 import {
-  Sidebar,
-  SidebarContent,
-  SidebarGroup,
-  SidebarGroupLabel,
-  SidebarHeader,
   SidebarInset,
-  SidebarMenu,
   SidebarProvider,
-  SidebarRail,
   SidebarTrigger,
 } from '@sunstead/ui/components/resizable-sidebar';
 import { ScrollArea } from '@sunstead/ui/components/scroll-area';
@@ -33,38 +25,40 @@ import {
   TableRow,
 } from '@sunstead/ui/components/table';
 import { ThemeProvider } from '@sunstead/ui/theme-provider';
-import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   Activity,
   ArchiveRestore,
   Box,
   Clock,
-  Container,
   Cpu,
-  FileText,
   Gauge,
   HardDrive,
-  HomeIcon,
   MemoryStick,
   Network,
-  Puzzle,
-  Settings,
   Terminal,
-  UserGroup,
   Users,
   type LucideIcon,
 } from 'lucide-react';
-import backgroundImg from '@/assets/wallpaper/wallpaper_minecraft_pc_bundle_2560x1440.png';
-import Play from "@/assets/icons/play.svg?react";
-import Plus from "@/assets/icons/plus.svg?react";
+import { ServerHero } from '#/components/server-hero';
+import { ServerPagePlaceholder } from '#/components/server-page-placeholder';
+import {
+  ServerRibbon,
+  ServerSidebar,
+  isServerId,
+  isServerPage,
+} from '#/components/server-navigation';
+import type { ServerId, ServerPage } from '#/components/server-navigation';
+import Plus from '@/assets/icons/plus.svg?react';
 
-export const Route = createFileRoute('/')({ component: Home });
+export const Route = createFileRoute('/')({
+  validateSearch: (search: Record<string, unknown>) => ({
+    server: isServerId(search.server) ? search.server : 'survival',
+    page: isServerPage(search.page) ? search.page : 'dashboard',
+  }),
+  component: Home,
+});
 
-/* -------------------------------------------------------------------------- */
-/*  Sample data (swap for real values from your server host / RCON / query)   */
-/* -------------------------------------------------------------------------- */
-
-// Deterministic fake time series so the sample renders identically every time.
 const wave = (base: number, amp: number, n: number, seed: number) =>
   Array.from({ length: n }, (_, i) =>
     Math.max(
@@ -116,10 +110,6 @@ const SLOW_MODS = [
   { name: 'Ferrite Core', value: 0.9, label: '0.9 ms' },
   { name: 'Farmers Delight', value: 1.7, label: '1.7 ms' },
 ];
-
-/* -------------------------------------------------------------------------- */
-/*  Small building blocks                                                     */
-/* -------------------------------------------------------------------------- */
 
 function Sparkline({
   series,
@@ -260,14 +250,9 @@ const levelStyles: Record<string, string> = {
 const pingTone = (ms: number) =>
   ms < 50 ? 'text-green-500' : ms < 100 ? 'text-yellow-500' : 'text-red-500';
 
-/* -------------------------------------------------------------------------- */
-/*  Dashboard                                                                 */
-/* -------------------------------------------------------------------------- */
-
 function Dashboard() {
   return (
     <div className='mx-auto w-full min-w-0 max-w-[1600px] space-y-4 p-4 md:p-6'>
-      {/* Headline stats */}
       <section
         aria-label='Server summary'
         className='grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4'
@@ -316,7 +301,6 @@ function Dashboard() {
         </StatCard>
       </section>
 
-      {/* Charts + players */}
       <section
         aria-label='Performance and players'
         className='grid grid-cols-1 gap-4 xl:grid-cols-4'
@@ -395,7 +379,6 @@ function Dashboard() {
         </Card>
       </section>
 
-      {/* Host + world + info */}
       <section
         aria-label='Host and world details'
         className='grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4'
@@ -463,7 +446,6 @@ function Dashboard() {
         </Card>
       </section>
 
-      {/* Logs, backups, mods */}
       <section
         aria-label='Activity'
         className='grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-4'
@@ -540,117 +522,46 @@ function Dashboard() {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Page                                                                      */
-/* -------------------------------------------------------------------------- */
-
 function Home() {
+  const { server, page } = Route.useSearch();
+  const navigate = useNavigate({ from: '/' });
+
+  const selectServer = (serverId: ServerId) => {
+    void navigate({
+      search: (previous) => ({ ...previous, server: serverId }),
+    });
+  };
+  const selectPage = (nextPage: ServerPage) => {
+    void navigate({
+      search: (previous) => ({ ...previous, page: nextPage }),
+    });
+  };
+
   return (
     <div className='h-dvh w-full overflow-hidden'>
       <ThemeProvider app='lodestone'>
         <SidebarProvider className='h-full min-h-0!'>
-          <Sidebar>
-            <SidebarHeader className='text-xl font-semibold border-b'>
-              <div className='py-1.5 px-2'>LODESTONE</div>
-            </SidebarHeader>
-            <SidebarContent>
-              <SidebarGroup>
-                <SidebarMenu className='gap-2 px-2'>
-                  <Button className='bevel py-6 text-lg font-semibold uppercase text-accent-foreground bg-(--bevel-base) hover:bg-(--bevel-base) bevel-main'>
-                    <Plus className='size-6' />
-                    Create Server
-                  </Button>
-                  {/* <Button className='bevel py-6 text-lg font-semibold uppercase text-accent-foreground bg-(--bevel-base) hover:bg-(--bevel-base) bevel-gray justify-start'>
-                    <Folder className='size-6' /> Add Existing
-                  </Button> */}
-                </SidebarMenu>
-              </SidebarGroup>
-              <SidebarGroup>
-                <SidebarGroupLabel>Servers</SidebarGroupLabel>
-                <SidebarMenu className='px-2 space-y-1'>
-                  <SidebarServerButton active />
-                  <SidebarServerButton />
-                  <SidebarServerButton />
-                </SidebarMenu>
-              </SidebarGroup>
-            </SidebarContent>
-            <SidebarRail />
-          </Sidebar>
+          <ServerSidebar activeServer={server} onServerSelect={selectServer}>
+            <Button className='bevel bevel-main bg-(--bevel-base) py-6 text-lg font-semibold uppercase text-accent-foreground hover:bg-(--bevel-base)'>
+              <Plus aria-hidden='true' className='size-6' />
+              <span>Create Server</span>
+            </Button>
+          </ServerSidebar>
           <SidebarInset className='min-h-0! min-w-0 overflow-hidden'>
             <div className='min-h-0 flex-1 overflow-y-auto overflow-x-hidden'>
-              <div
-                className='min-h-64 w-full relative bg-cover bg-center flex flex-col justify-end pb-14'
-                style={{
-                  backgroundImage: `url(${backgroundImg})`,
-                }}
-              >
-                <div className='absolute inset-0 bg-linear-to-r from-black/40 to-black/40 via-transparent z-0'></div>
-
-                <div className='flex flex-wrap items-center gap-4 p-4 z-10 my-auto'>
-                  <div className='flex min-w-0 items-center gap-x-4'>
-                    <Box className='size-20 min-w-20 sm:size-32 sm:min-w-32' />
-                    <div className='min-w-0'>
-                      <p className='truncate text-4xl font-bold sm:text-6xl text-shadow-lg'>Survival</p>
-                      <p className='text-xl text-muted-foreground text-shadow-lg font-semibold'>
-                        Fabric 26.3
-                      </p>
-                    </div>
-                  </div>
-                  <div className='flex items-center ml-auto'>
-                    <Button className='bevel py-6 px-8 text-lg font-semibold uppercase text-accent-foreground bg-(--bevel-base) hover:bg-(--bevel-base) bevel-main'>
-                      <Play className='size-6' /> Start
-                    </Button>
-                  </div>
-                </div>
+              <ServerHero serverId={server} />
+              <div className='sticky top-0 z-20 -mt-14 flex h-14 min-w-0 items-stretch border-y bg-sidebar/80 backdrop-blur-md'>
+                <SidebarTrigger
+                  aria-label='Toggle sidebar'
+                  className='mx-2 shrink-0 self-center'
+                />
+                <ServerRibbon activePage={page} onPageSelect={selectPage} />
               </div>
-
-              <div className='sticky top-0 z-20 -mt-14 flex h-14 w-full items-stretch overflow-x-auto overflow-y-hidden border-y bg-sidebar/80 backdrop-blur-md'>
-                <SidebarTrigger className='mx-2 shrink-0 self-center' />
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <HomeIcon /> Dashboard
-                </Button>
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full active:shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <Terminal /> Console
-                </Button>
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full active:shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <FileText /> Server Properties
-                </Button>
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full active:shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <Puzzle /> Mods
-                </Button>
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full active:shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <UserGroup /> Players
-                </Button>
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full active:shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <Container /> Backups
-                </Button>
-                <Button
-                  variant='ghost'
-                  className='p-4 py-4 h-full active:shadow-[inset_0_-4px_0_0_var(--color-main)]'
-                >
-                  <Settings /> Settings
-                </Button>
-              </div>
-
-              <Dashboard />
+              {page === 'dashboard' ? (
+                <Dashboard />
+              ) : (
+                <ServerPagePlaceholder page={page} />
+              )}
             </div>
           </SidebarInset>
         </SidebarProvider>

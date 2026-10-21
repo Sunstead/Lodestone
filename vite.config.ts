@@ -12,6 +12,11 @@ const config = defineConfig({
       'use-sync-external-store/shim',
       'use-sync-external-store/shim/with-selector',
     ],
+    // @sunstead/ui is source-only and its components import sibling modules by
+    // relative path. Pre-bundling a deep entry (e.g. `use-theme`) creates a
+    // second copy of shared React contexts, so `useTheme` reads a different
+    // context than the one `ThemeProvider` writes. Keep the package as source.
+    exclude: ['@sunstead/ui'],
   },
   plugins: [
     devtools(),

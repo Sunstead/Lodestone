@@ -1,3 +1,4 @@
+import { ScrollArea } from '@sunstead/ui/components/scroll-area';
 import { cn } from '@sunstead/ui/utils';
 import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -70,6 +71,29 @@ export function EmptyState({
       {description ? <p className='max-w-md text-sm text-muted-foreground'>{description}</p> : null}
       {children ? <div className='mt-2 flex flex-wrap items-center justify-center gap-2'>{children}</div> : null}
     </div>
+  );
+}
+
+/**
+ * Wraps a table in a height-capped scroll area so long lists scroll instead
+ * of pushing the page down. The table header stays put while the body moves.
+ *
+ * The height is definite rather than a max: a Base UI scroll area only clips
+ * its viewport when the root has a resolved height.
+ */
+export function ScrollTable({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <ScrollArea className={cn('h-[calc(100dvh-16rem)] [&>[data-slot=scroll-area-viewport]>div]:block!', className)}>
+      <div className='[&_[data-slot=table-header]]:sticky [&_[data-slot=table-header]]:top-0 [&_[data-slot=table-header]]:z-10 [&_[data-slot=table-header]]:bg-card'>
+        {children}
+      </div>
+    </ScrollArea>
   );
 }
 

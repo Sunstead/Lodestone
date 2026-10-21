@@ -19,7 +19,7 @@ import {
 import { Separator } from '@sunstead/ui/components/separator';
 import { Skeleton } from '@sunstead/ui/components/skeleton';
 import { Switch } from '@sunstead/ui/components/switch';
-import { useUpdateWorld, useWorld, useWorldStatus } from '#/api/queries';
+import { useInstances, useUpdateWorld, useWorld, useWorldStatus } from '#/api/queries';
 import type { Difficulty, GameMode, LevelType, World } from '#/api/types';
 import { KeyValue, SectionHeading, StatStrip } from '#/components/page-parts';
 import { BackupsPanel } from '#/routes/-pages/backups-panel';
@@ -122,11 +122,28 @@ function ToggleRow({
   );
 }
 
-export function WorldDetailPage({ worldId, page }: { worldId: string; page: string }) {
+export function WorldDetailPage({
+  worldId,
+  page,
+  onOpenInstance,
+  onLaunch,
+}: {
+  worldId: string;
+  page: string;
+  onOpenInstance?: (instanceId: string) => void;
+  onLaunch?: () => void;
+}) {
   const world = useWorld(worldId);
   const status = useWorldStatus(worldId);
+  const instances = useInstances();
   const update = useUpdateWorld(worldId);
   const [draft, setDraft] = useState<GameplayDraft | null>(null);
+
+  const serverName = useMemo(() => {
+    const data = world.data;
+    if (!data?.attachedInstanceId) return null;
+    return (instances.data ?? []).find((entry) => entry.id === data.attachedInstanceId)?.name ?? null;
+  }, [world.data, instances.data]);
 
   useEffect(() => {
     setDraft(null);
@@ -194,9 +211,19 @@ export function WorldDetailPage({ worldId, page }: { worldId: string; page: stri
           <span className='flex flex-wrap items-center gap-2'>
             <code className='text-xs'>{data.folder}</code>
             {data.attachedInstanceId ? (
-              <Badge variant='secondary' className='gap-1'>
-                attached to {data.attachedInstanceId}
-              </Badge>
+              onOpenInstance ? (
+                <button
+                  type='button'
+                  className='rounded-sm bg-muted px-1.5 py-0.5 text-xs font-medium hover:underline'
+                  onClick={() => onOpenInstance(data.attachedInstanceId!)}
+                >
+                  mounted by {serverName ?? data.attachedInstanceId}
+                </button>
+              ) : (
+                <Badge variant='secondary' className='gap-1'>
+                  mounted by {serverName ?? data.attachedInstanceId}
+                </Badge>
+              )
             ) : (
               <Badge className='bg-main/15 text-main'>free</Badge>
             )}
@@ -205,6 +232,12 @@ export function WorldDetailPage({ worldId, page }: { worldId: string; page: stri
         action={
           page === 'gameplay' ? (
             <>
+              {!data.attachedInstanceId && onLaunch ? (
+                <Button variant='outline' size='sm' onClick={onLaunch}>
+                  <Play />
+                  Launch with this world
+                </Button>
+              ) : null}
               {dirtyCount > 0 ? (
                 <Button variant='ghost' size='sm' onClick={() => setDraft(null)}>
                   <Undo2 />
@@ -256,7 +289,7 @@ export function WorldDetailPage({ worldId, page }: { worldId: string; page: stri
             <CardHeader className='border-b bg-muted/30 px-4 py-3'>
               <CardTitle className='text-base'>Rules for this world</CardTitle>
               <CardDescription>
-                These follow the world, so two instances can share a profile but play differently.
+                These follow the world, so two servers can share a configuration but play differently.
               </CardDescription>
             </CardHeader>
             <CardContent className='divide-y p-0'>
@@ -468,8 +501,8 @@ export function WorldDetailPage({ worldId, page }: { worldId: string; page: stri
               <p className='flex items-center gap-2 text-xs text-muted-foreground'>
                 <Play className='size-3.5' />
                 {data.attachedInstanceId
-                  ? 'A container is running this world right now.'
-                  : 'No container has it mounted; the data sits safely on disk.'}
+                  ? 'A server is running this world right now.'
+                  : 'No server has it mounted; the data sits safely on disk.'}
               </p>
             </CardContent>
           </Card>
@@ -490,14 +523,15 @@ function SwitchWorldHint({ world }: { world: World }) {
     <Card>
       <CardHeader>
         <CardTitle className='flex items-center gap-2'>
-          <TriangleAlert className='size-4' /> Attached elsewhere
+          <TriangleAlert className='size-4' /> Mounted elsewhere
         </CardTitle>
-        <CardDescription>Mounted by {world.attachedInstanceId}.</CardDescription>
+        <CardDescription>In use by a server.</CardDescription>
       </CardHeader>
       <CardContent className='space-y-3 text-sm'>
         <p className='text-muted-foreground'>
-          A world is mounted by one container at a time. Switching an instance onto another world stops
-          it, remounts the volume and starts it again — both the profile and this world are kept.
+          A world is mounted by one server at a time. Moving it onto another server stops the
+          container, remounts the volume and starts it again — both the configuration and this world
+          are kept.
         </p>
         <div className='flex items-start gap-2 rounded-md border border-yellow-500/40 bg-yellow-500/10 p-3'>
           <TriangleAlert className='mt-0.5 size-4 shrink-0 text-yellow-500' />

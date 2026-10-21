@@ -19,19 +19,22 @@ import { Separator } from '@sunstead/ui/components/separator';
 import { Skeleton } from '@sunstead/ui/components/skeleton';
 import { Switch } from '@sunstead/ui/components/switch';
 import { Textarea } from '@sunstead/ui/components/textarea';
-import { useProfile, useSoftware, useUpdateProfile } from '#/api/queries';
+import { useInstances, useProfile, useSoftware, useUpdateProfile } from '#/api/queries';
 import type { CreateProfileRequest, Profile, ServerSoftwareId } from '#/api/types';
-import { KeyValue, SectionHeading, StatStrip } from '#/components/page-parts';
+import { EmptyState, KeyValue, SectionHeading, StatStrip } from '#/components/page-parts';
 import { ModsPanel } from '#/routes/-pages/mods-panel';
 import { PropertiesPage } from '#/routes/-pages/properties';
 import { BevelButton } from '#/components/server-hero';
+import { ServerStateDot } from '#/components/server-state';
 import { formatRelative } from '#/lib/format';
 import {
   Box,
   Cpu,
   MemoryStick,
+  Play,
   Puzzle,
   Save,
+  Server,
   Settings2,
   Undo2,
 } from 'lucide-react';
@@ -80,7 +83,17 @@ const CPU_OPTIONS = [
   { value: '8', label: '8 cores' },
 ];
 
-export function ProfileDetailPage({ profileId, page }: { profileId: string; page: string }) {
+export function ProfileDetailPage({
+  profileId,
+  page,
+  onOpenInstance,
+  onLaunch,
+}: {
+  profileId: string;
+  page: string;
+  onOpenInstance?: (instanceId: string) => void;
+  onLaunch?: () => void;
+}) {
   const profile = useProfile(profileId);
   const software = useSoftware();
   const update = useUpdateProfile(profileId);
@@ -132,7 +145,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
         <SectionHeading
           title='Mods & Plugins'
           icon={Puzzle}
-          description={`Anything installed here is shared by every instance running ${data.software} ${data.version}.`}
+          description={`Anything installed here is shared by every server running ${data.software} ${data.version}.`}
         />
         <ModsPanel profileId={data.id} />
       </div>
@@ -147,7 +160,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
   return (
     <div className='mx-auto flex w-full min-w-0 max-w-[1600px] flex-col gap-4 p-4 md:p-6'>
       <SectionHeading
-        title='Profile settings'
+        title='Configuration'
         icon={Box}
         description={
           <span className='flex flex-wrap items-center gap-2'>
@@ -156,7 +169,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
             </span>
             <Badge variant='outline'>{kindLabel}</Badge>
             {data.instanceCount > 0 ? (
-              <Badge variant='secondary'>{data.instanceCount} attached</Badge>
+              <Badge variant='secondary'>{data.instanceCount} in use</Badge>
             ) : (
               <Badge className='bg-main/15 text-main'>free</Badge>
             )}
@@ -168,6 +181,12 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
               <Button variant='ghost' size='sm' onClick={() => setDraft(null)}>
                 <Undo2 />
                 Discard {dirtyCount}
+              </Button>
+            ) : null}
+            {onLaunch ? (
+              <Button variant='outline' size='sm' onClick={onLaunch}>
+                <Play />
+                Launch a world with this
               </Button>
             ) : null}
             <BevelButton
@@ -196,9 +215,9 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
             hint: 'container limit',
           },
           {
-            label: 'Instances',
+            label: 'Servers',
             value: String(data.instanceCount),
-            hint: data.instanceCount > 0 ? 'sharing this profile' : 'available',
+            hint: data.instanceCount > 0 ? 'sharing this configuration' : 'available',
           },
           {
             label: 'Updated',
@@ -213,7 +232,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
             <CardTitle className='flex items-center gap-2'>
               <Settings2 className='size-4' /> Software
             </CardTitle>
-            <CardDescription>What runs inside every instance using this profile.</CardDescription>
+            <CardDescription>What runs inside every server using this configuration.</CardDescription>
           </CardHeader>
           <CardContent className='space-y-4'>
             <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
@@ -371,7 +390,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
               </Select>
               <p className='flex items-center gap-1.5 text-xs text-muted-foreground'>
                 <Cpu className='size-3.5' />
-                Docker `--cpus` applied to every container built from this profile.
+                Docker `--cpus` applied to every container built from this configuration.
               </p>
             </div>
 
@@ -429,7 +448,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
               </div>
             </div>
             <p className='text-xs text-muted-foreground'>
-              The Minecraft port is chosen per instance so several containers can share one profile.
+              The Minecraft port is chosen per server so several containers can share one configuration.
             </p>
           </CardContent>
         </Card>
@@ -439,7 +458,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
             <CardTitle className='flex items-center gap-2'>
               <Puzzle className='size-4' /> Supervision
             </CardTitle>
-            <CardDescription>How Lodestone keeps every instance honest.</CardDescription>
+            <CardDescription>How Lodestone keeps every server honest.</CardDescription>
           </CardHeader>
           <CardContent className='grid grid-cols-1 gap-4 sm:grid-cols-3'>
             <div className='flex items-center justify-between gap-4 rounded-md border p-3'>
@@ -456,7 +475,7 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
             <div className='flex items-center justify-between gap-4 rounded-md border p-3'>
               <div className='min-w-0'>
                 <p className='text-sm font-medium'>Restart on crash</p>
-                <p className='text-xs text-muted-foreground'>Recover a failed instance</p>
+                <p className='text-xs text-muted-foreground'>Recover a failed server</p>
               </div>
               <Switch
                 checked={current.restartOnCrash}
@@ -480,7 +499,72 @@ export function ProfileDetailPage({ profileId, page }: { profileId: string; page
             </div>
           </CardContent>
         </Card>
+
+        {onOpenInstance ? (
+          <AssociatedServersCard profileId={data.id} onOpenInstance={onOpenInstance} onLaunch={onLaunch} />
+        ) : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * Servers currently built on this configuration. Because a configuration is
+ * reusable, this is often more than one — the card is how you get from a
+ * configuration back to the servers that run it.
+ */
+function AssociatedServersCard({
+  profileId,
+  onOpenInstance,
+  onLaunch,
+}: {
+  profileId: string;
+  onOpenInstance: (instanceId: string) => void;
+  onLaunch?: () => void;
+}) {
+  const instances = useInstances();
+  const servers = (instances.data ?? []).filter((instance) => instance.profileId === profileId);
+
+  return (
+    <Card className='xl:col-span-2'>
+      <CardHeader className='flex-row items-center justify-between gap-3'>
+        <div className='min-w-0'>
+          <CardTitle className='flex items-center gap-2'>
+            <Server className='size-4' /> Servers using this configuration
+          </CardTitle>
+          <CardDescription>Deleting a server leaves this configuration intact.</CardDescription>
+        </div>
+        {onLaunch ? (
+          <Button variant='outline' size='sm' onClick={onLaunch}>
+            <Play />
+            Launch a world with this
+          </Button>
+        ) : null}
+      </CardHeader>
+      <CardContent>
+        {servers.length === 0 ? (
+          <EmptyState
+            icon={Server}
+            title='No servers yet'
+            description='Launch a world with this configuration to create one.'
+          />
+        ) : (
+          <div className='flex flex-wrap gap-2'>
+            {servers.map((instance) => (
+              <button
+                key={instance.id}
+                type='button'
+                className='flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/60'
+                onClick={() => onOpenInstance(instance.id)}
+              >
+                <ServerStateDot state={instance.state} className='size-2.5' />
+                <span className='font-medium'>{instance.name}</span>
+                <span className='text-xs text-muted-foreground'>{instance.world.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

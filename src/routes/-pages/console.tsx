@@ -386,7 +386,7 @@ export function ConsolePage({ instanceId }: { instanceId: string }) {
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <Button type='submit' disabled={!run || !command.trim()} className='bevel bevel-main bg-(--bevel-base) text-accent-foreground hover:bg-(--bevel-base)'>
+                    <Button type='submit' variant='ghost' disabled={!run || !command.trim()} className='bevel bevel-main bg-(--bevel-base)! text-accent-foreground hover:bg-(--bevel-base)!'>
                       <CornerDownLeft />
                       Send
                     </Button>

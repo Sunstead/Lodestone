@@ -235,7 +235,7 @@ function DerivedRow({ field }: { field: PropertyField }) {
           </Badge>
         </div>
         <p className='mt-1 text-xs leading-relaxed text-muted-foreground'>
-          {field.derivedFrom ? `Mirrors this profile's own key: ${field.derivedFrom}.` : field.description}
+          {field.derivedFrom ? `Mirrors this configuration's own key: ${field.derivedFrom}.` : field.description}
         </p>
         <code className='mt-1 inline-block text-[11px] text-muted-foreground/70'>{field.key}</code>
       </div>
@@ -331,9 +331,9 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
   return (
     <div className='mx-auto flex w-full min-w-0 max-w-[1600px] flex-col gap-4 p-4 md:p-6'>
       <SectionHeading
-        title='Profile properties'
+        title='Configuration properties'
         icon={FileText}
-        description='Only the keys a profile owns are editable here. World rules live on the world asset, and published ports live on the instance.'
+        description='Only the keys a configuration owns are editable here. World rules live on the world asset, and published ports live on the server.'
         action={
           <>
             <span className='text-xs text-muted-foreground'>
@@ -365,7 +365,7 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
       {save.isSuccess && !dirtyCount ? (
         <p className='flex items-center gap-2 rounded-md border border-main/40 bg-main/10 px-3 py-2 text-sm'>
           <Check className='size-4 text-main' />
-          server.properties written to the profile. Keys marked “applies live” took effect immediately; the rest apply on the next restart.
+          server.properties written to the configuration. Keys marked “applies live” took effect immediately; the rest apply on the next restart.
         </p>
       ) : null}
 
@@ -408,9 +408,9 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
             <CardContent className='space-y-2 px-4 text-xs text-muted-foreground'>
               <p className='break-all font-mono'>{query.data?.path}</p>
               <Separator />
-              <p>{fields.length} profile keys tracked by Lodestone.</p>
+              <p>{fields.length} configuration keys tracked by Lodestone.</p>
               <p>
-                Keys owned by a world or an instance are listed but locked — edit them on the asset that owns them.
+                Keys owned by a world or a server are listed but locked — edit them on the asset that owns them.
               </p>
             </CardContent>
           </Card>
@@ -457,14 +457,14 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
               onClick={() => setShowOther((value) => !value)}
               className='text-xs font-medium text-muted-foreground underline-offset-4 hover:underline'
             >
-              {showOther ? 'Hide' : 'Show'} what this profile does not own
+              {showOther ? 'Hide' : 'Show'} what this configuration does not own
             </button>
             {showOther ? (
               <Card className='gap-0 overflow-hidden py-0'>
                 <CardHeader className='border-b bg-muted/30 px-4 py-3'>
                   <CardTitle className='text-base'>Owned elsewhere</CardTitle>
                   <CardDescription>
-                    These keys stay in server.properties, but Lodestone writes them from the world or the instance.
+                    These keys stay in server.properties, but Lodestone writes them from the world or the server.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className='divide-y p-0'>
@@ -486,7 +486,7 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
                     field={{
                       key: 'difficulty / gamemode / pvp',
                       label: 'World gameplay rules',
-                      description: 'Set per world so two instances can share a profile but play differently.',
+                      description: 'Set per world so two servers can share a configuration but play differently.',
                       scope: 'world',
                       group: '',
                       control: 'text',
@@ -499,11 +499,11 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
                     field={{
                       key: 'server-port / server-ip',
                       label: 'Published ports',
-                      description: 'Chosen per instance so several containers can share one profile.',
+                      description: 'Chosen per server so several containers can share one configuration.',
                       scope: 'instance',
                       group: '',
                       control: 'text',
-                      value: 'see the instance dashboard',
+                      value: 'see the server dashboard',
                       defaultValue: '',
                       readOnly: true,
                     }}

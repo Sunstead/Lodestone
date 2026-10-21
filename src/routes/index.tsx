@@ -1,4 +1,14 @@
 import { Badge } from '@sunstead/ui/components/badge';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@sunstead/ui/components/alert-dialog';
 import { Button } from '@sunstead/ui/components/button';
 import {
   SidebarInset,
@@ -9,14 +19,16 @@ import { Skeleton } from '@sunstead/ui/components/skeleton';
 import { Toaster } from '@sunstead/ui/components/sonner';
 import { ThemeProvider } from '@sunstead/ui/theme-provider';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { TriangleAlert } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import Plus from '@/assets/icons/plus.svg?react';
 import backgroundImg from '@/assets/wallpaper/wallpaper_minecraft_pc_bundle_2560x1440.png';
 
 import { detectMode, getMode, onModeChange } from '#/api/client';
-import { useInstances, useInstanceAction, useInstanceStatus, useProfiles, useWorlds } from '#/api/queries';
-import type { ApiMode } from '#/api/types';
+import { useDeleteInstance, useInstances, useInstanceAction, useInstanceStatus, useProfiles, useWorlds } from '#/api/queries';
+import type { ApiMode, Instance } from '#/api/types';
 import { CreateInstanceDialog } from '#/components/create-instance-dialog';
+import { LaunchWorldDialog } from '#/components/launch-world-dialog';
 import { LocationHeader } from '#/components/location-header';
 import type { Crumb } from '#/components/location-header';
 import {
@@ -28,6 +40,8 @@ import {
 } from '#/components/server-navigation';
 import type { Page, Section } from '#/components/server-navigation';
 import { BevelButton, ServerHero } from '#/components/server-hero';
+import { AllBackupsPage } from '#/routes/-pages/all-backups';
+import { AppSettingsPage } from '#/routes/-pages/app-settings';
 import { ConsolePage } from '#/routes/-pages/console';
 import { DashboardPage } from '#/routes/-pages/dashboard';
 import { PlayersPage } from '#/routes/-pages/players';
@@ -96,6 +110,10 @@ function Home() {
   const profiles = useProfiles();
   const worlds = useWorlds();
   const [createOpen, setCreateOpen] = useState(false);
+  const [launchOpen, setLaunchOpen] = useState(false);
+  const [launchWorldId, setLaunchWorldId] = useState<string | undefined>(undefined);
+  const [pendingDeleteServer, setPendingDeleteServer] = useState<Instance | null>(null);
+  const removeInstance = useDeleteInstance();
 
   const instanceList = instances.data ?? [];
   const profileList = profiles.data ?? [];
@@ -137,9 +155,25 @@ function Home() {
   const selectInstance = (id: string) => go({ section: 'instance', assetId: id });
   const selectProfile = (id: string) => go({ section: 'profile', assetId: id });
   const selectWorld = (id: string) => go({ section: 'world', assetId: id });
-  const openWorldsDirectory = () => go({ section: 'directory', page: 'worlds' });
-  const openProfilesDirectory = () => go({ section: 'directory', page: 'profiles' });
+  const openDirectory = (page: Page) => go({ section: 'directory', page });
+  const openConfigurations = () => openDirectory('profiles');
+  const openWorldsPage = () => openDirectory('worlds');
+  const openBackupsPage = () => openDirectory('all-backups');
+  const openSettingsPage = () => openDirectory('app-settings');
   const selectPage = (page: Page) => go({ section, assetId: location.assetId, page });
+
+  /** Open the launch flow, optionally seeded with a world to use. */
+  const launchWorld = (worldId?: string) => {
+    setLaunchWorldId(worldId);
+    setLaunchOpen(true);
+  };
+
+  /** Open the full instance dialog for people who want to pick an existing configuration. */
+  const openCreateServer = () => setCreateOpen(true);
+
+  /** Sidebar dropdown: jump to the configuration or world a server is made of. */
+  const openServerConfig = (server: Instance) => selectProfile(server.profileId);
+  const openServerWorld = (server: Instance) => selectWorld(server.worldId);
 
   // Keep the URL honest after lists load or an asset is deleted: fall back to
   // the first instance, otherwise to the directory, never to a stale id.
@@ -162,15 +196,17 @@ function Home() {
 
   const pages = pagesOf(section);
   const ribbonLabel =
-    section === 'directory' ? 'Directory' : `${SECTION_LABEL[section]} · ${activePage}`;
+    section === 'directory'
+      ? (pages.find((entry) => entry.id === activePage)?.label ?? 'Directory')
+      : `${SECTION_LABEL[section]} · ${activePage}`;
 
   const crumbs: Crumb[] = buildCrumbs({
     section,
     profile,
     world,
     activePage,
-    openWorldsDirectory,
-    openProfilesDirectory,
+    openConfigurations,
+    openWorldsPage,
   });
 
   return (
@@ -179,20 +215,21 @@ function Home() {
         <SidebarProvider className='h-full min-h-0!'>
           <LodestoneSidebar
             instances={instanceList}
-            profiles={profileList}
-            worlds={worldList}
             activeInstanceId={instanceId}
-            activeProfileId={profileId}
-            activeWorldId={worldId}
+            activePage={activePage}
+            section={section}
             onInstanceSelect={selectInstance}
-            onProfileSelect={selectProfile}
-            onWorldSelect={selectWorld}
-            onOpenProfilesDirectory={openProfilesDirectory}
-            onOpenWorldsDirectory={openWorldsDirectory}
+            onInstanceOpenConfig={openServerConfig}
+            onInstanceOpenWorld={openServerWorld}
+            onInstanceDelete={setPendingDeleteServer}
+            onOpenConfigurations={openConfigurations}
+            onOpenWorlds={openWorldsPage}
+            onOpenBackups={openBackupsPage}
+            onOpenSettings={openSettingsPage}
           >
-            <BevelButton className='py-6 text-lg' onClick={() => setCreateOpen(true)}>
+            <BevelButton className='py-6 text-lg' onClick={() => launchWorld()}>
               <Plus aria-hidden='true' className='size-6' />
-              <span>Create Instance</span>
+              <span>Launch world</span>
             </BevelButton>
           </LodestoneSidebar>
 
@@ -216,30 +253,16 @@ function Home() {
                       onOpenWorld={() => selectWorld(instance.worldId)}
                     />
                   ) : (
-                    <NoInstances loading={instances.isLoading} onCreate={() => setCreateOpen(true)} />
+                    <NoInstances loading={instances.isLoading} onLaunch={() => launchWorld()} onCreate={openCreateServer} />
                   )}
 
-                  {/* The hero names the instance, so the strip is just tabs + controls. */}
+                  {/* The hero names the instance and owns start/stop, so this strip is just page tabs. */}
                   <LocationHeader
                     variant='tabs-only'
                     pages={pages}
                     activePage={activePage}
                     onPageSelect={selectPage}
                     ribbonLabel={ribbonLabel}
-                    actions={
-                      instance ? (
-                        <Button
-                          variant='ghost'
-                          size='sm'
-                          disabled={action.isPending}
-                          onClick={() =>
-                            action.mutate(status.data?.state === 'running' ? 'restart' : 'start')
-                          }
-                        >
-                          {status.data?.state === 'running' ? 'Restart' : 'Start'}
-                        </Button>
-                      ) : undefined
-                    }
                   />
 
                   {instance ? (
@@ -252,36 +275,60 @@ function Home() {
                         instanceId={instanceId}
                         status={status.data}
                         playersOnline={status.data?.players.online ?? instance.players.online}
+                        onOpenProfile={() => selectProfile(instance.profileId)}
+                        onOpenWorld={() => selectWorld(instance.worldId)}
                       />
                     )
                   ) : null}
                 </>
               ) : (
                 <>
-                  <LocationHeader
-                    crumbs={crumbs}
-                    pages={pages}
-                    activePage={activePage}
-                    onPageSelect={selectPage}
-                    ribbonLabel={ribbonLabel}
-                  />
+                  {section === 'directory' ? (
+                    <LocationHeader variant='title-only' ribbonLabel={ribbonLabel} />
+                  ) : (
+                    <LocationHeader
+                      crumbs={crumbs}
+                      pages={pages}
+                      activePage={activePage}
+                      onPageSelect={selectPage}
+                      ribbonLabel={ribbonLabel}
+                    />
+                  )}
 
                   {section === 'world' ? (
                     world ? (
-                      <WorldDetailPage worldId={world.id} page={activePage} />
+                      <WorldDetailPage
+                        worldId={world.id}
+                        page={activePage}
+                        onOpenInstance={selectInstance}
+                        onLaunch={() => launchWorld(world.id)}
+                      />
                     ) : (
                       <Loading />
                     )
                   ) : section === 'profile' ? (
                     profile ? (
-                      <ProfileDetailPage profileId={profile.id} page={activePage} />
+                      <ProfileDetailPage
+                        profileId={profile.id}
+                        page={activePage}
+                        onOpenInstance={selectInstance}
+                        onLaunch={() => launchWorld()}
+                      />
                     ) : (
                       <Loading />
                     )
                   ) : activePage === 'profiles' ? (
-                    <ProfilesPage onOpenProfile={selectProfile} />
+                    <ProfilesPage onOpenProfile={selectProfile} onOpenInstance={selectInstance} />
+                  ) : activePage === 'all-backups' ? (
+                    <AllBackupsPage onOpenWorld={selectWorld} onOpenWorlds={openWorldsPage} />
+                  ) : activePage === 'app-settings' ? (
+                    <AppSettingsPage />
                   ) : (
-                    <WorldsPage onOpenWorld={selectWorld} />
+                    <WorldsPage
+                      onOpenWorld={selectWorld}
+                      onOpenInstance={selectInstance}
+                      onLaunchWorld={launchWorld}
+                    />
                   )}
                 </>
               )}
@@ -294,6 +341,51 @@ function Home() {
           onOpenChange={setCreateOpen}
           onCreated={(id) => selectInstance(id)}
         />
+        <LaunchWorldDialog
+          open={launchOpen}
+          onOpenChange={(next) => {
+            setLaunchOpen(next);
+            if (!next) setLaunchWorldId(undefined);
+          }}
+          worldId={launchWorldId}
+          onLaunched={(id) => selectInstance(id)}
+        />
+        <AlertDialog
+          open={pendingDeleteServer !== null}
+          onOpenChange={(open) => (open ? undefined : setPendingDeleteServer(null))}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete this server?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {pendingDeleteServer
+                  ? `${pendingDeleteServer.name} will be removed. Its configuration and the world it ran are kept — you can launch that world again at any time.`
+                  : ''}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className='flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm'>
+              <TriangleAlert className='mt-0.5 size-4 shrink-0 text-destructive' />
+              <p>The container is removed. Nothing is deleted from the world's data on disk.</p>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel render={<Button variant='outline' />}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                render={
+                  <BevelButton
+                    tone='danger'
+                    className='px-4 py-4 text-sm'
+                    onClick={() => {
+                      if (pendingDeleteServer) removeInstance.mutate(pendingDeleteServer.id);
+                      setPendingDeleteServer(null);
+                    }}
+                  />
+                }
+              >
+                Delete server
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         <DemoBadge />
         <Toaster />
       </div>
@@ -333,8 +425,10 @@ function resolveLocation({
     const valid = pagesOf('instance').some((entry) => entry.id === page);
     return { section: 'instance', assetId: instanceId, page: valid ? (page as Page) : fallback };
   }
-  // Directory: only the two list pages are valid here.
-  const directoryPage: Page = page === 'profiles' ? 'profiles' : 'worlds';
+  // Directory: only the list pages are valid here.
+  const directoryPage: Page = pagesOf('directory').some((entry) => entry.id === page)
+    ? (page as Page)
+    : 'worlds';
   return { section: 'directory', assetId: '', page: directoryPage };
 }
 
@@ -343,44 +437,66 @@ function buildCrumbs({
   profile,
   world,
   activePage,
-  openWorldsDirectory,
-  openProfilesDirectory,
+  openConfigurations,
+  openWorldsPage,
 }: {
   section: Section;
   profile?: { name: string };
   world?: { name: string };
   activePage: Page;
-  openWorldsDirectory: () => void;
-  openProfilesDirectory: () => void;
+  openConfigurations: () => void;
+  openWorldsPage: () => void;
 }): Crumb[] {
   if (section === 'world') {
     return [
-      { label: SECTION_LABEL.world, onClick: openWorldsDirectory },
+      { label: SECTION_LABEL.world, onClick: openWorldsPage },
       { label: world?.name ?? 'World' },
     ];
   }
   if (section === 'profile') {
     return [
-      { label: SECTION_LABEL.profile, onClick: openProfilesDirectory },
-      { label: profile?.name ?? 'Profile' },
+      { label: SECTION_LABEL.profile, onClick: openConfigurations },
+      { label: profile?.name ?? 'Configuration' },
     ];
   }
-  return [{ label: activePage === 'profiles' ? 'Profiles' : 'Worlds' }];
+  const label =
+    activePage === 'profiles'
+      ? 'Configurations'
+      : activePage === 'all-backups'
+        ? 'Backups'
+        : activePage === 'app-settings'
+          ? 'Settings'
+          : 'Worlds';
+  return [{ label }];
 }
 
-function NoInstances({ loading, onCreate }: { loading: boolean; onCreate: () => void }) {
+function NoInstances({
+  loading,
+  onLaunch,
+  onCreate,
+}: {
+  loading: boolean;
+  onLaunch: () => void;
+  onCreate: () => void;
+}) {
   return (
     <div className='mx-auto flex w-full max-w-[1600px] flex-col items-start gap-3 p-6'>
-      <p className='text-lg font-medium'>{loading ? 'Loading instances…' : 'No instances yet'}</p>
+      <p className='text-lg font-medium'>{loading ? 'Loading servers…' : 'No servers yet'}</p>
       {loading ? null : (
         <>
           <p className='text-sm text-muted-foreground'>
-            An instance pairs a profile with a world. Both are kept even if you delete the instance.
+            Launch a world to create one. A server pairs a configuration with a world — both are kept
+            even if you delete the server.
           </p>
-          <BevelButton className='px-4 py-5 text-base' onClick={onCreate}>
-            <Plus aria-hidden='true' />
-            Create Instance
-          </BevelButton>
+          <div className='flex flex-wrap items-center gap-2'>
+            <BevelButton className='px-4 py-5 text-base' onClick={onLaunch}>
+              <Plus aria-hidden='true' />
+              Launch world
+            </BevelButton>
+            <Button variant='outline' size='sm' onClick={onCreate}>
+              Use an existing configuration
+            </Button>
+          </div>
         </>
       )}
     </div>

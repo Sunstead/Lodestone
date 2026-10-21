@@ -20,26 +20,46 @@ export type Crumb = {
  *
  * `crumbs` is the section-and-asset breadcrumb. `tabs-only` drops that row
  * for instances, where the hero already names the asset and only the page
- * ribbon is needed.
+ * ribbon is needed. `title-only` drops the ribbon instead, for directory
+ * pages that are reached only through the sidebar and have no siblings to
+ * tab between.
  *
  * The ribbon always shows exactly one section's pages, so worlds never sit
  * beside instance tabs.
  */
 export function LocationHeader(
   props: {
-    pages: readonly PageMeta[];
-    activePage: Page;
-    onPageSelect: (page: Page) => void;
+    pages?: readonly PageMeta[];
+    activePage?: Page;
+    onPageSelect?: (page: Page) => void;
     /** Names the asset these pages belong to, for screen readers. */
-    ribbonLabel: string;
+    ribbonLabel?: string;
     /** Section-level controls shown at the right of the header. */
     actions?: ReactNode;
   } & (
     | { variant?: 'crumbs'; crumbs: Crumb[] }
     | { variant: 'tabs-only'; crumbs?: never }
+    | { variant: 'title-only'; crumbs?: never }
   ),
 ) {
-  const { pages, activePage, onPageSelect, ribbonLabel, actions } = props;
+  const { actions } = props;
+
+  if (props.variant === 'title-only') {
+    return (
+      <div className='sticky top-0 z-30 flex h-12 min-w-0 items-center gap-2 border-y bg-sidebar/85 px-2 backdrop-blur-md'>
+        <SidebarTrigger aria-label='Toggle sidebar' className='shrink-0' />
+        <h1 className='min-w-0 truncate text-base font-semibold'>{props.ribbonLabel}</h1>
+        {actions ? <div className='ml-auto flex shrink-0 items-center gap-2'>{actions}</div> : null}
+      </div>
+    );
+  }
+
+  const { pages, activePage, onPageSelect, ribbonLabel } = props as {
+    pages: readonly PageMeta[];
+    activePage: Page;
+    onPageSelect: (page: Page) => void;
+    ribbonLabel: string;
+  };
   const crumbs = props.variant === 'tabs-only' ? null : props.crumbs;
 
   return (

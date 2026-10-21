@@ -161,7 +161,7 @@ export function CreateInstanceDialog({
     if (profileMode === 'create') {
       const body: CreateProfileRequest = {
         ...profileDraft,
-        description: 'Created while setting up an instance',
+        description: 'Created while setting up a server',
         cpuCores: null,
         javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=200',
         autoStart: true,
@@ -193,9 +193,9 @@ export function CreateInstanceDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='sm:max-w-2xl'>
         <DialogHeader>
-          <DialogTitle>New instance</DialogTitle>
+          <DialogTitle>New server</DialogTitle>
           <DialogDescription>
-            An instance is one profile paired with one world, running in its own container. Deleting
+            A server is one configuration paired with one world, running in its own container. Deleting
             it later keeps both assets.
           </DialogDescription>
         </DialogHeader>
@@ -335,7 +335,7 @@ export function CreateInstanceDialog({
 
           <AssetPicker
             icon={Box}
-            title='Profile'
+            title='Configuration'
             description='Supplies the software, version, mods and resource limits.'
             mode={profileMode}
             onModeChange={setProfileMode}
@@ -351,7 +351,7 @@ export function CreateInstanceDialog({
                 onValueChange={(value) => value !== null && setProfileId(value)}
               >
                 <SelectTrigger className='w-full'>
-                  <SelectValue placeholder='Pick a free profile' />
+                  <SelectValue placeholder='Pick a free configuration' />
                 </SelectTrigger>
                 <SelectContent>
                   {freeProfiles.map((profile) => (
@@ -364,7 +364,7 @@ export function CreateInstanceDialog({
             ) : (
               <FieldGroup>
                 <Field>
-                  <FieldLabel htmlFor='inline-profile-name'>Profile name</FieldLabel>
+                  <FieldLabel htmlFor='inline-profile-name'>Configuration name</FieldLabel>
                   <Input
                     id='inline-profile-name'
                     value={profileDraft.name}
@@ -525,7 +525,7 @@ export function CreateInstanceDialog({
           </Button>
           <BevelButton className='px-5 py-4 text-sm' disabled={!canSubmit || busy} onClick={submit}>
             <Plus />
-            {createInstance.isPending ? 'Creating…' : 'Create instance'}
+            {createInstance.isPending ? 'Creating…' : 'Create server'}
           </BevelButton>
         </DialogFooter>
       </DialogContent>

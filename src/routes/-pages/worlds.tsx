@@ -50,10 +50,11 @@ import {
   useCreateWorld,
   useDeleteWorld,
   useDuplicateWorld,
+  useInstances,
   useWorlds,
 } from '#/api/queries';
-import type { CreateWorldRequest, Difficulty, GameMode, LevelType, World } from '#/api/types';
-import { EmptyState, SectionHeading } from '#/components/page-parts';
+import type { CreateWorldRequest, Difficulty, GameMode, Instance, LevelType, World } from '#/api/types';
+import { EmptyState, ScrollTable, SectionHeading } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
 import { formatBytes, formatRelative } from '#/lib/format';
 import {
@@ -62,6 +63,7 @@ import {
   Layers,
   Lock,
   Pencil,
+  Play,
   Plus,
   Trash2,
   TriangleAlert,
@@ -167,8 +169,8 @@ export function WorldDialog({
         <DialogHeader>
           <DialogTitle>{editing ? 'New world from this one' : 'Create world'}</DialogTitle>
           <DialogDescription>
-            A world is a standalone asset. It can be mounted by one instance at a time and keeps its
-            region data, gameplay rules and backups when no instance is running.
+            A world is a standalone asset. It can be mounted by one server at a time and keeps its
+            region data, gameplay rules and backups when no server is running.
           </DialogDescription>
         </DialogHeader>
 
@@ -348,16 +350,26 @@ export function WorldDialog({
 
 export function WorldsPage({
   onOpenWorld,
+  onOpenInstance,
+  onLaunchWorld,
 }: {
   onOpenWorld: (worldId: string) => void;
+  onOpenInstance?: (instanceId: string) => void;
+  onLaunchWorld?: (worldId: string) => void;
 }) {
   const worlds = useWorlds();
+  const instances = useInstances();
   const duplicate = useDuplicateWorld();
   const remove = useDeleteWorld();
   const [createOpen, setCreateOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<World | null>(null);
 
   const list = worlds.data ?? [];
+  const serverById = useMemo(() => {
+    const map = new Map<string, Instance>();
+    for (const instance of instances.data ?? []) map.set(instance.id, instance);
+    return map;
+  }, [instances.data]);
 
   const totals = useMemo(
     () => ({
@@ -381,7 +393,7 @@ export function WorldsPage({
       <SectionHeading
         title='Worlds'
         icon={Layers}
-        description={`${list.length} world${list.length === 1 ? '' : 's'} · ${totals.attached} attached · ${formatBytes(totals.bytes, 1)} on disk`}
+        description={`${list.length} world${list.length === 1 ? '' : 's'} · ${totals.attached} mounted · ${formatBytes(totals.bytes, 1)} on disk`}
         action={
           <BevelButton className='px-5 py-5 text-base' onClick={() => setCreateOpen(true)}>
             <Plus />
@@ -396,25 +408,30 @@ export function WorldsPage({
             <EmptyState
               icon={Layers}
               title='No worlds yet'
-              description='A world holds the terrain, gameplay rules and backups. Create one, then attach it to an instance.'
+              description='A world holds the terrain, gameplay rules and backups. Create one, then launch it to run a server.'
             />
           </CardContent>
         </Card>
       ) : (
         <Card className='gap-0 overflow-hidden py-0'>
+          <ScrollTable>
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>World</TableHead>
                 <TableHead>Folder</TableHead>
-                <TableHead className='hidden sm:table-cell'>Generation</TableHead>
+                <TableHead className='hidden sm:table-cell'>Server</TableHead>
                 <TableHead className='hidden lg:table-cell'>Gameplay</TableHead>
                 <TableHead className='text-right'>Size</TableHead>
                 <TableHead className='text-right'>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {list.map((world) => (
+              {list.map((world) => {
+                const server = world.attachedInstanceId
+                  ? serverById.get(world.attachedInstanceId)
+                  : undefined;
+                return (
                 <TableRow key={world.id}>
                   <TableCell>
                     <div className='flex items-center gap-2'>
@@ -428,7 +445,7 @@ export function WorldsPage({
                       {world.attachedInstanceId ? (
                         <Badge variant='secondary' className='gap-1'>
                           <Boxes className='size-3' />
-                          attached
+                          mounted
                         </Badge>
                       ) : (
                         <Badge className='bg-main/15 text-main'>free</Badge>
@@ -443,15 +460,30 @@ export function WorldsPage({
                     <code className='text-xs text-muted-foreground'>{world.folder}</code>
                   </TableCell>
                   <TableCell className='hidden sm:table-cell'>
-                    <div className='flex items-center gap-1.5'>
-                      <span className='text-sm'>{levelTypeLabel(world.levelType)}</span>
-                      {world.generated ? (
-                        <Lock aria-hidden='true' className='size-3 text-muted-foreground' />
-                      ) : null}
-                    </div>
-                    <p className='mt-0.5 text-xs text-muted-foreground'>
-                      {world.seed ? `seed ${world.seed}` : 'random seed'}
-                    </p>
+                    {server ? (
+                      onOpenInstance ? (
+                        <button
+                          type='button'
+                          className='truncate text-left text-sm font-medium hover:underline'
+                          onClick={() => onOpenInstance(server.id)}
+                        >
+                          {server.name}
+                        </button>
+                      ) : (
+                        <span className='text-sm'>{server.name}</span>
+                      )
+                    ) : onLaunchWorld ? (
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        onClick={() => onLaunchWorld(world.id)}
+                      >
+                        <Play />
+                        Launch
+                      </Button>
+                    ) : (
+                      <span className='text-sm text-muted-foreground'>not running</span>
+                    )}
                   </TableCell>
                   <TableCell className='hidden lg:table-cell text-sm text-muted-foreground capitalize'>
                     {world.gamemode} · {world.difficulty}
@@ -462,6 +494,16 @@ export function WorldsPage({
                   </TableCell>
                   <TableCell>
                     <div className='flex items-center justify-end gap-1'>
+                      {onLaunchWorld && !world.attachedInstanceId ? (
+                        <Button
+                          variant='ghost'
+                          size='sm'
+                          onClick={() => onLaunchWorld(world.id)}
+                        >
+                          <Play />
+                          Launch
+                        </Button>
+                      ) : null}
                       <Button
                         variant='ghost'
                         size='icon-sm'
@@ -486,7 +528,7 @@ export function WorldsPage({
                         disabled={remove.isPending || world.attachedInstanceId !== null}
                         title={
                           world.attachedInstanceId
-                            ? 'Detach this world from its instance first'
+                            ? 'Detach this world from its server first'
                             : undefined
                         }
                         onClick={() => setPendingDelete(world)}
@@ -497,9 +539,11 @@ export function WorldsPage({
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
+          </ScrollTable>
         </Card>
       )}
 
@@ -525,7 +569,7 @@ export function WorldsPage({
           {pendingDelete?.attachedInstanceId ? (
             <div className='flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm'>
               <TriangleAlert className='mt-0.5 size-4 shrink-0 text-destructive' />
-              <p>An instance currently has this world mounted. Stop and detach it first.</p>
+              <p>A server currently has this world mounted. Stop and detach it first.</p>
             </div>
           ) : null}
           <AlertDialogFooter>

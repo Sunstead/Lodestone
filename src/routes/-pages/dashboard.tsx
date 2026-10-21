@@ -1,5 +1,4 @@
 import { Avatar, AvatarFallback } from '@sunstead/ui/components/avatar';
-import { Button } from '@sunstead/ui/components/button';
 import {
   Card,
   CardContent,
@@ -18,13 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from '@sunstead/ui/components/table';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@sunstead/ui/components/tooltip';
-import { useConsoleTail, useInstanceAction, useInstanceStatus, usePlayers } from '#/api/queries';
+import { useConsoleTail, useInstance, useInstanceStatus, usePlayers } from '#/api/queries';
 import type { ConsoleLine, InstanceStatus } from '#/api/types';
 import { KeyValue, SectionHeading } from '#/components/page-parts';
 import { ServerStateBadge } from '#/components/server-state';
@@ -39,6 +32,7 @@ import {
 } from '#/lib/format';
 import {
   Activity,
+  Box,
   Clock,
   Cpu,
   Gauge,
@@ -46,10 +40,7 @@ import {
   Layers,
   MemoryStick,
   Network,
-  Package,
-  RefreshCw,
-  Save,
-  Square,
+  Server,
   Terminal,
   Users,
   type LucideIcon,
@@ -187,22 +178,23 @@ function MeterRow({ label, detail, percent: value }: { label: string; detail: st
   );
 }
 
-const tpsTone = (tps: number) =>
-  tps >= 19.5 ? 'text-green-500' : tps >= 18 ? 'text-yellow-500' : 'text-red-500';
-
 export function DashboardPage({
   instanceId,
   status,
   playersOnline,
+  onOpenProfile,
+  onOpenWorld,
 }: {
   instanceId: string;
   status?: InstanceStatus;
   playersOnline: number;
+  onOpenProfile?: () => void;
+  onOpenWorld?: () => void;
 }) {
   const statusQuery = useInstanceStatus(instanceId);
+  const instanceQuery = useInstance(instanceId);
   const players = usePlayers(instanceId);
   const consoleTail = useConsoleTail(instanceId);
-  const action = useInstanceAction(instanceId);
   const [latest, setLatest] = useState<ConsoleLine[]>([]);
 
   useEffect(() => {
@@ -228,6 +220,7 @@ export function DashboardPage({
 
   const onlinePlayers = players.data?.players.filter((player) => player.online) ?? [];
   const running = live.state === 'running';
+  const instance = instanceQuery.data;
 
   return (
     <div className='mx-auto w-full min-w-0 max-w-[1600px] space-y-4 p-4 md:p-6'>
@@ -235,26 +228,62 @@ export function DashboardPage({
         title='Overview'
         description={`Snapshot of ${live.container.name} right now`}
         icon={Activity}
-        action={
-          <>
-            <Button variant='outline' size='sm' disabled={!running || action.isPending} onClick={() => action.mutate('restart')}>
-              <RefreshCw />
-              Restart
-            </Button>
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={!running || action.isPending}
-              onClick={() => action.mutate('stop')}
-            >
-              <Square />
-              Stop
-            </Button>
-          </>
-        }
       />
 
-      <section aria-label='Instance summary' className='grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4'>
+      {instance ? (
+        <Card>
+          <CardHeader className='pb-3'>
+            <CardTitle className='flex items-center gap-2 text-base'>
+              <Server className='size-4' /> This server is made of
+            </CardTitle>
+            <CardDescription>
+              A configuration and a world, running together in one container. Both outlive the server.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
+            <button
+              type='button'
+              disabled={!onOpenProfile}
+              onClick={onOpenProfile}
+              className='flex items-center gap-3 rounded-md border p-3 text-left transition-colors enabled:hover:bg-muted/60'
+            >
+              <span className='flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/40'>
+                <Box className='size-4 text-muted-foreground' />
+              </span>
+              <span className='min-w-0'>
+                <span className='block text-xs font-medium tracking-wide text-muted-foreground uppercase'>
+                  Configuration
+                </span>
+                <span className='block truncate font-medium'>{instance.profile.name}</span>
+                <span className='block truncate text-xs text-muted-foreground'>
+                  {instance.profile.software} {instance.profile.version}
+                </span>
+              </span>
+            </button>
+            <button
+              type='button'
+              disabled={!onOpenWorld}
+              onClick={onOpenWorld}
+              className='flex items-center gap-3 rounded-md border p-3 text-left transition-colors enabled:hover:bg-muted/60'
+            >
+              <span className='flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/40'>
+                <Layers className='size-4 text-muted-foreground' />
+              </span>
+              <span className='min-w-0'>
+                <span className='block text-xs font-medium tracking-wide text-muted-foreground uppercase'>
+                  World
+                </span>
+                <span className='block truncate font-medium'>{instance.world.name}</span>
+                <span className='block truncate text-xs text-muted-foreground'>
+                  <code>{instance.world.folder}</code> · mounted read-write
+                </span>
+              </span>
+            </button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <section aria-label='Server summary' className='grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4'>
         <StatCard
           title='Uptime'
           icon={Clock}
@@ -292,7 +321,7 @@ export function DashboardPage({
           unit='TPS'
           percentValue={running ? Math.min(100, (live.tickMs / 50) * 100) : 0}
           meterLabel='Tick time budget used'
-          footnote={running ? `Average tick ${formatNumber(live.tickMs)} ms (budget 50 ms)` : 'Instance not running'}
+          footnote={running ? `Average tick ${formatNumber(live.tickMs)} ms (budget 50 ms)` : 'Server not running'}
         />
       </section>
 
@@ -348,7 +377,7 @@ export function DashboardPage({
                   {onlinePlayers.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={4} className='py-8 text-center text-sm text-muted-foreground'>
-                        {running ? 'Waiting for someone to join…' : 'Start the instance to see players here.'}
+                        {running ? 'Waiting for someone to join…' : 'Start the server to see players here.'}
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -441,7 +470,7 @@ export function DashboardPage({
               label='World data'
               value={
                 <span className='text-xs text-muted-foreground'>
-                  Mounted from the world asset — open it from the sidebar
+                  Mounted from the world asset — open it above
                 </span>
               }
             />
@@ -490,43 +519,6 @@ export function DashboardPage({
                 detail={`${formatBytes(live.disk.usedBytes, 1)} / ${formatBytes(live.disk.totalBytes, 0)}`}
                 percent={percent(live.disk.usedBytes, live.disk.totalBytes)}
               />
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className='flex items-center gap-2'>
-                <Package className='size-4' /> Quick actions
-              </CardTitle>
-              <CardDescription>Runs against the container directly</CardDescription>
-            </CardHeader>
-            <CardContent className='space-y-2'>
-              <Button
-                variant='outline'
-                className='w-full justify-start'
-                disabled={action.isPending}
-                onClick={() => action.mutate('restart')}
-              >
-                <RefreshCw />
-                Restart instance
-              </Button>
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Button variant='outline' className='w-full justify-start' disabled={!running} onClick={() => action.mutate('stop')}>
-                        <Save />
-                        Save and stop
-                      </Button>
-                    }
-                  />
-                  <TooltipContent>The container receives SIGTERM. Minecraft saves players and chunks first, and the world is left on disk.</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              <p className={`flex items-center gap-2 pt-1 text-xs ${tpsTone(live.tps)}`}>
-                <Activity className='size-3.5' />
-                {running ? `Tick rate ${live.tps.toFixed(2)} across this instance` : 'Instance offline'}
-              </p>
             </CardContent>
           </Card>
         </div>

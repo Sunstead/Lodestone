@@ -315,7 +315,7 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
                 />
               </CardContent>
             ) : (
-              <ScrollArea className='max-h-[32rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
+              <ScrollArea className='h-[32rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
                 <Table>
                   <TableHeader className='sticky top-0 z-10 bg-card'>
                     <TableRow>
@@ -351,7 +351,7 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
             <Ban className='size-4' /> Bans
           </CardTitle>
           <CardDescription>
-            Mirrors banned-players.json and banned-ips.json for the world this instance has mounted.
+            Mirrors banned-players.json and banned-ips.json for the world this server has mounted.
           </CardDescription>
         </CardHeader>
         <CardContent>

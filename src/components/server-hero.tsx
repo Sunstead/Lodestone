@@ -28,8 +28,9 @@ export function BevelButton({
 }: React.ComponentProps<typeof Button> & { tone?: 'main' | 'gray' | 'danger' }) {
   return (
     <Button
+      variant='ghost'
       className={cn(
-        'bevel bg-(--bevel-base) font-semibold uppercase text-accent-foreground hover:bg-(--bevel-base)',
+        'bevel bg-(--bevel-base)! font-semibold uppercase text-accent-foreground hover:bg-(--bevel-base)!',
         TONE[tone],
         className,
       )}
@@ -145,7 +146,7 @@ export function ServerHero({
                 type='button'
                 onClick={onOpenProfile}
                 className='flex items-center gap-1.5 rounded-sm bg-accent/50 px-2 py-1 text-sm font-semibold text-foreground text-shadow-lg ring-1 ring-foreground/15 backdrop-blur-lg transition-colors hover:bg-accent/70'
-                title='Open this profile'
+                title='Open this configuration'
               >
                 <Box aria-hidden='true' className='size-3.5' />
                 {instance.profile.name}

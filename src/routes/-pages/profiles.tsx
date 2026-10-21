@@ -51,11 +51,12 @@ import {
   useCreateProfile,
   useDeleteProfile,
   useDuplicateProfile,
+  useInstances,
   useProfiles,
   useSoftware,
 } from '#/api/queries';
-import type { CreateProfileRequest, Profile, ServerSoftwareId } from '#/api/types';
-import { EmptyState, SectionHeading } from '#/components/page-parts';
+import type { CreateProfileRequest, Instance, Profile, ServerSoftwareId } from '#/api/types';
+import { EmptyState, ScrollTable, SectionHeading } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
 import { formatRelative } from '#/lib/format';
 import {
@@ -149,10 +150,10 @@ function ProfileDialog({
     >
       <DialogContent className='sm:max-w-lg'>
         <DialogHeader>
-          <DialogTitle>{editing ? 'New profile from this one' : 'Create profile'}</DialogTitle>
+          <DialogTitle>{editing ? 'New configuration from this one' : 'Create configuration'}</DialogTitle>
           <DialogDescription>
-            A profile carries the software, version, mods, properties and resource limits. Many
-            instances can run the same profile.
+            A configuration carries the software, version, mods, properties and resource limits. Many
+            servers can run the same configuration.
           </DialogDescription>
         </DialogHeader>
 
@@ -174,7 +175,7 @@ function ProfileDialog({
                 id='profile-description'
                 rows={2}
                 value={draft.description}
-                placeholder='What this profile is tuned for'
+                placeholder='What this configuration is tuned for'
                 onChange={(event) =>
                   setDraft((previous) => ({ ...previous, description: event.target.value }))
                 }
@@ -299,7 +300,7 @@ function ProfileDialog({
             onClick={submit}
           >
             <Plus />
-            {create.isPending ? 'Creating…' : 'Create profile'}
+            {create.isPending ? 'Creating…' : 'Create configuration'}
           </BevelButton>
         </DialogFooter>
       </DialogContent>
@@ -309,10 +310,13 @@ function ProfileDialog({
 
 export function ProfilesPage({
   onOpenProfile,
+  onOpenInstance,
 }: {
   onOpenProfile: (profileId: string) => void;
+  onOpenInstance?: (instanceId: string) => void;
 }) {
   const profiles = useProfiles();
+  const instances = useInstances();
   const duplicate = useDuplicateProfile();
   const remove = useDeleteProfile();
   const [createOpen, setCreateOpen] = useState(false);
@@ -320,6 +324,16 @@ export function ProfilesPage({
 
   const list = profiles.data ?? [];
   const attached = useMemo(() => list.filter((profile) => profile.instanceCount > 0).length, [list]);
+
+  const serversByProfile = useMemo(() => {
+    const map = new Map<string, Instance[]>();
+    for (const instance of instances.data ?? []) {
+      const bucket = map.get(instance.profileId);
+      if (bucket) bucket.push(instance);
+      else map.set(instance.profileId, [instance]);
+    }
+    return map;
+  }, [instances.data]);
 
   if (profiles.isLoading) {
     return (
@@ -333,13 +347,13 @@ export function ProfilesPage({
   return (
     <div className='mx-auto flex w-full min-w-0 max-w-[1600px] flex-col gap-4 p-4 md:p-6'>
       <SectionHeading
-        title='Profiles'
+        title='Configurations'
         icon={Box}
-        description={`${list.length} profile${list.length === 1 ? '' : 's'} · ${attached} in use by an instance`}
+        description={`${list.length} configuration${list.length === 1 ? '' : 's'} · ${attached} used by a server`}
         action={
           <BevelButton className='px-5 py-5 text-base' onClick={() => setCreateOpen(true)}>
             <Plus />
-            Create profile
+            Create configuration
           </BevelButton>
         }
       />
@@ -349,26 +363,29 @@ export function ProfilesPage({
           <CardContent className='p-6'>
             <EmptyState
               icon={Box}
-              title='No profiles yet'
-              description='A profile defines the software, mods and limits. Create one, then pair it with a world to make an instance.'
+              title='No configurations yet'
+              description='A configuration defines the software, mods and limits. Create one, then pair it with a world to launch a server.'
             />
           </CardContent>
         </Card>
       ) : (
         <Card className='gap-0 overflow-hidden py-0'>
+          <ScrollTable>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Profile</TableHead>
+                <TableHead>Configuration</TableHead>
                 <TableHead>Software</TableHead>
                 <TableHead className='hidden sm:table-cell'>Resources</TableHead>
                 <TableHead className='hidden lg:table-cell'>Supervision</TableHead>
-                <TableHead className='text-right'>Instances</TableHead>
+                <TableHead className='text-right'>Servers</TableHead>
                 <TableHead className='text-right'>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {list.map((profile) => (
+              {list.map((profile) => {
+                const servers = serversByProfile.get(profile.id) ?? [];
+                return (
                 <TableRow key={profile.id}>
                   <TableCell>
                     <div className='flex items-center gap-2'>
@@ -380,7 +397,7 @@ export function ProfilesPage({
                         {profile.name}
                       </button>
                       {profile.instanceCount > 0 ? (
-                        <Badge variant='secondary'>{profile.instanceCount} attached</Badge>
+                        <Badge variant='secondary'>{profile.instanceCount} in use</Badge>
                       ) : (
                         <Badge className='bg-main/15 text-main'>free</Badge>
                       )}
@@ -411,8 +428,30 @@ export function ProfilesPage({
                     {profile.autoStart ? 'autostart' : 'manual start'}
                     {profile.restartOnCrash ? ' · restarts' : ''}
                   </TableCell>
-                  <TableCell className='text-right tabular-nums text-muted-foreground'>
-                    {profile.instanceCount}
+                  <TableCell className='text-right'>
+                    {servers.length === 0 ? (
+                      <span className='text-muted-foreground tabular-nums'>0</span>
+                    ) : (
+                      <div className='flex flex-wrap justify-end gap-1'>
+                        {servers.map((instance) =>
+                          onOpenInstance ? (
+                            <button
+                              key={instance.id}
+                              type='button'
+                              className='rounded-sm bg-muted px-1.5 py-0.5 text-xs font-medium hover:underline'
+                              title='Open this server'
+                              onClick={() => onOpenInstance(instance.id)}
+                            >
+                              {instance.name}
+                            </button>
+                          ) : (
+                            <span key={instance.id} className='rounded-sm bg-muted px-1.5 py-0.5 text-xs'>
+                              {instance.name}
+                            </span>
+                          ),
+                        )}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     <div className='flex items-center justify-end gap-1'>
@@ -446,9 +485,11 @@ export function ProfilesPage({
                     </div>
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
+          </ScrollTable>
         </Card>
       )}
 
@@ -464,7 +505,7 @@ export function ProfilesPage({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete this profile?</AlertDialogTitle>
+            <AlertDialogTitle>Delete this configuration?</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingDelete
                 ? `${pendingDelete.name} will be removed, along with the mods, properties and limits it holds. Worlds it ran are kept untouched.`
@@ -473,7 +514,7 @@ export function ProfilesPage({
           </AlertDialogHeader>
           <div className='flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm'>
             <TriangleAlert className='mt-0.5 size-4 shrink-0 text-destructive' />
-            <p>Any world you used with this profile stays on disk and can be attached to another profile.</p>
+            <p>Any world you used with this configuration stays on disk and can be launched by another server.</p>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel render={<Button variant='outline' />}>Cancel</AlertDialogCancel>
@@ -490,7 +531,7 @@ export function ProfilesPage({
               }
             >
               <Trash2 />
-              Delete profile
+              Delete configuration
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

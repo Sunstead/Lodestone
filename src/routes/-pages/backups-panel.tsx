@@ -44,7 +44,7 @@ import {
   useRestoreBackup,
 } from '#/api/queries';
 import type { Backup } from '#/api/types';
-import { EmptyState, KeyValue, StatStrip } from '#/components/page-parts';
+import { EmptyState, KeyValue, ScrollTable, StatStrip } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
 import { formatBytes, formatRelative, formatWhen, percent } from '#/lib/format';
 import {
@@ -79,7 +79,7 @@ const STATUS_BADGE: Record<Backup['status'], { label: string; variant: 'default'
 };
 
 /**
- * Backups belong to a world, not to a container. Deleting every instance
+ * Backups belong to a world, not to a container. Deleting every server
  * that ran a world leaves these archives untouched.
  */
 export function BackupsPanel({ worldId, worldName }: { worldId: string; worldName: string }) {
@@ -130,7 +130,7 @@ export function BackupsPanel({ worldId, worldName }: { worldId: string; worldNam
                 <History className='size-4' /> Snapshots of {worldName}
               </CardTitle>
               <CardDescription>
-                Each snapshot archives this world's region data and stays with the world, not the instance.
+                Each snapshot archives this world's region data and stays with the world, not the server.
               </CardDescription>
             </div>
             {running ? (
@@ -157,6 +157,7 @@ export function BackupsPanel({ worldId, worldName }: { worldId: string; worldNam
               />
             </CardContent>
           ) : (
+            <ScrollTable className='h-[30rem]'>
             <Table>
               <TableHeader>
                 <TableRow>
@@ -221,6 +222,7 @@ export function BackupsPanel({ worldId, worldName }: { worldId: string; worldNam
                 })}
               </TableBody>
             </Table>
+            </ScrollTable>
           )}
         </Card>
 
@@ -315,7 +317,7 @@ export function BackupsPanel({ worldId, worldName }: { worldId: string; worldNam
             <AlertDialogTitle>Restore this snapshot?</AlertDialogTitle>
             <AlertDialogDescription>
               {pendingRestore
-                ? `${pendingRestore.name} from ${formatWhen(pendingRestore.createdAt)} will overwrite ${worldName}. If an instance has it mounted, the container stops, the archive is unpacked, and the server starts again.`
+                ? `${pendingRestore.name} from ${formatWhen(pendingRestore.createdAt)} will overwrite ${worldName}. If a server has it mounted, the container stops, the archive is unpacked, and the server starts again.`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>

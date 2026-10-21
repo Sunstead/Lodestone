@@ -3,10 +3,11 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
   SidebarRail,
 } from '@sunstead/ui/components/resizable-sidebar';
 import {
@@ -16,7 +17,6 @@ import {
   Gamepad2,
   Gauge,
   Layers,
-  List,
   Puzzle,
   Settings,
   Terminal,
@@ -25,11 +25,11 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { SidebarInstanceButton } from './sidebar-server-button';
-import { SidebarAssetButton } from './sidebar-asset-button';
-import type { Instance, Profile, World } from '#/api/types';
+import { useInstanceAction } from '#/api/queries';
+import type { Instance } from '#/api/types';
 
 /**
- * Lodestone has three asset kinds plus the two directories that list them.
+ * Lodestone has three asset kinds plus the directories that list them.
  * A location is exactly one of these sections; the pages below it belong
  * to that section and never leak into another one's ribbon.
  */
@@ -41,7 +41,7 @@ export type Section = 'instance' | 'profile' | 'world' | 'directory';
  *   instance   what the container is doing right now
  *   profile    software, version, mods, properties, limits
  *   world      terrain, gameplay rules, backups
- *   directory  the lists of profiles and worlds
+ *   directory  the lists of configurations and worlds
  */
 export const PAGES = [
   { id: 'dashboard', label: 'Dashboard', icon: Gauge, section: 'instance' },
@@ -57,7 +57,9 @@ export const PAGES = [
   { id: 'mods', label: 'Mods & Plugins', icon: Puzzle, section: 'profile' },
 
   { id: 'worlds', label: 'Worlds', icon: Layers, section: 'directory' },
-  { id: 'profiles', label: 'Profiles', icon: Box, section: 'directory' },
+  { id: 'profiles', label: 'Configurations', icon: Box, section: 'directory' },
+  { id: 'all-backups', label: 'Backups', icon: Container, section: 'directory' },
+  { id: 'app-settings', label: 'Settings', icon: Settings, section: 'directory' },
 ] as const satisfies readonly {
   id: string;
   label: string;
@@ -87,40 +89,56 @@ export const DEFAULT_PAGE: Record<Section, Page> = {
 
 /** Human name used in breadcrumbs and the ribbon's accessible label. */
 export const SECTION_LABEL: Record<Section, string> = {
-  instance: 'Instance',
-  profile: 'Profiles',
+  instance: 'Server',
+  profile: 'Configurations',
   world: 'Worlds',
   directory: 'Directory',
 };
 
+/**
+ * The sidebar lists the servers you run, then a flat set of links to the
+ * shared libraries (configurations, worlds) and the app's own pages
+ * (backups, settings). Assets are no longer enumerated here — each list
+ * lives on its own page, so the sidebar stays short no matter how many
+ * worlds or configurations exist.
+ */
 export function LodestoneSidebar({
   instances,
-  profiles,
-  worlds,
   activeInstanceId,
-  activeProfileId,
-  activeWorldId,
+  activePage,
+  section,
+  onInstanceOpenConfig,
+  onInstanceOpenWorld,
+  onInstanceDelete,
   onInstanceSelect,
-  onProfileSelect,
-  onWorldSelect,
-  onOpenProfilesDirectory,
-  onOpenWorldsDirectory,
+  onOpenConfigurations,
+  onOpenWorlds,
+  onOpenBackups,
+  onOpenSettings,
   children,
 }: {
   instances: Instance[];
-  profiles: Profile[];
-  worlds: World[];
   activeInstanceId: string;
-  activeProfileId: string;
-  activeWorldId: string;
+  activePage: Page;
+  section: Section;
   onInstanceSelect: (id: string) => void;
-  onProfileSelect: (id: string) => void;
-  onWorldSelect: (id: string) => void;
-  onOpenProfilesDirectory: () => void;
-  onOpenWorldsDirectory: () => void;
+  onInstanceOpenConfig: (instance: Instance) => void;
+  onInstanceOpenWorld: (instance: Instance) => void;
+  onInstanceDelete: (instance: Instance) => void;
+  onOpenConfigurations: () => void;
+  onOpenWorlds: () => void;
+  onOpenBackups: () => void;
+  onOpenSettings: () => void;
   children: ReactNode;
 }) {
   const running = instances.filter((instance) => instance.state === 'running').length;
+
+  const links = [
+    { label: 'Configurations', icon: Box, page: 'profiles' as Page, onClick: onOpenConfigurations },
+    { label: 'Worlds', icon: Layers, page: 'worlds' as Page, onClick: onOpenWorlds },
+    { label: 'Backups', icon: Container, page: 'all-backups' as Page, onClick: onOpenBackups },
+    { label: 'Settings', icon: Settings, page: 'app-settings' as Page, onClick: onOpenSettings },
+  ];
 
   return (
     <Sidebar>
@@ -134,78 +152,52 @@ export function LodestoneSidebar({
 
         <SidebarGroup>
           <SidebarGroupLabel>
-            Instances
+            Servers
             <span className='ml-auto text-xs font-normal text-muted-foreground tabular-nums'>
               {running}/{instances.length} online
             </span>
           </SidebarGroupLabel>
           <SidebarMenu className='space-y-1 px-2'>
-            {instances.map((instance) => (
-              <SidebarInstanceButton
-                key={instance.id}
-                name={instance.name}
-                version={`${instance.profile.software} ${instance.profile.version}`}
-                state={instance.state}
-                active={instance.id === activeInstanceId}
-                onClick={() => onInstanceSelect(instance.id)}
-              />
-            ))}
+            {instances.length === 0 ? (
+              <p className='px-2 py-1.5 text-sm text-muted-foreground'>
+                No servers yet — launch a world to create one.
+              </p>
+            ) : (
+              instances.map((instance) => (
+                <SidebarServerRow
+                  key={instance.id}
+                  instance={instance}
+                  active={instance.id === activeInstanceId}
+                  onSelect={() => onInstanceSelect(instance.id)}
+                  onOpenConfig={() => onInstanceOpenConfig(instance)}
+                  onOpenWorld={() => onInstanceOpenWorld(instance)}
+                  onDelete={() => onInstanceDelete(instance)}
+                />
+              ))
+            )}
           </SidebarMenu>
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel>Profiles</SidebarGroupLabel>
-          <SidebarGroupAction
-            aria-label='Show all profiles'
-            title='Show all profiles'
-            onClick={onOpenProfilesDirectory}
-          >
-            <List />
-          </SidebarGroupAction>
+          <SidebarGroupLabel>Library</SidebarGroupLabel>
           <SidebarMenu className='space-y-1 px-2'>
-            {profiles.map((profile) => (
-              <SidebarAssetButton
-                key={profile.id}
-                kind='profile'
-                name={profile.name}
-                version={`${profile.software} ${profile.version}`}
-                active={profile.id === activeProfileId}
-                badge={
-                  profile.instanceCount > 0
-                    ? { label: `${profile.instanceCount} attached`, tone: 'muted' }
-                    : { label: 'free', tone: 'main' }
-                }
-                onClick={() => onProfileSelect(profile.id)}
-              />
-            ))}
-          </SidebarMenu>
-        </SidebarGroup>
-
-        <SidebarGroup>
-          <SidebarGroupLabel>Worlds</SidebarGroupLabel>
-          <SidebarGroupAction
-            aria-label='Show all worlds'
-            title='Show all worlds'
-            onClick={onOpenWorldsDirectory}
-          >
-            <List />
-          </SidebarGroupAction>
-          <SidebarMenu className='space-y-1 px-2'>
-            {worlds.map((world) => (
-              <SidebarAssetButton
-                key={world.id}
-                kind='world'
-                name={world.name}
-                version={`${world.folder} · ${world.levelType.replace('minecraft:', '')}`}
-                active={world.id === activeWorldId}
-                badge={
-                  world.attachedInstanceId
-                    ? { label: 'attached', tone: 'muted' }
-                    : { label: 'free', tone: 'main' }
-                }
-                onClick={() => onWorldSelect(world.id)}
-              />
-            ))}
+            {links.map(({ label, icon: Icon, page, onClick }) => {
+              const active = section === 'directory' && activePage === page;
+              return (
+                <SidebarMenuItem key={label}>
+                  <SidebarMenuButton
+                    onClick={onClick}
+                    aria-current={active ? 'page' : undefined}
+                    className={`gap-3 border-l-4 py-2 ${
+                      active ? 'border-l-main bg-sidebar-accent' : 'border-l-transparent'
+                    }`}
+                  >
+                    <Icon aria-hidden='true' className='size-4 text-muted-foreground' />
+                    <span className='text-base text-foreground'>{label}</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              );
+            })}
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
@@ -214,6 +206,43 @@ export function LodestoneSidebar({
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
+  );
+}
+
+/**
+ * One server row in the sidebar. Owns its own action mutation so the
+ * dropdown can start, stop and restart the server without the sidebar
+ * re-rendering the whole list.
+ */
+function SidebarServerRow({
+  instance,
+  active,
+  onSelect,
+  onOpenConfig,
+  onOpenWorld,
+  onDelete,
+}: {
+  instance: Instance;
+  active: boolean;
+  onSelect: () => void;
+  onOpenConfig: () => void;
+  onOpenWorld: () => void;
+  onDelete: () => void;
+}) {
+  const action = useInstanceAction(instance.id);
+
+  return (
+    <SidebarInstanceButton
+      instance={instance}
+      active={active}
+      onClick={onSelect}
+      onOpenConfig={onOpenConfig}
+      onOpenWorld={onOpenWorld}
+      onStart={() => action.mutate('start')}
+      onStop={() => action.mutate('stop')}
+      onRestart={() => action.mutate('restart')}
+      onDelete={onDelete}
+    />
   );
 }
 

@@ -244,13 +244,13 @@ export function ModsPanel({ profileId }: { profileId: string }) {
                   title={installed.length === 0 ? 'Nothing installed yet' : 'No matches'}
                   description={
                     installed.length === 0
-                      ? 'Browse the catalog to add your first plugin, or drop jars into the profile folder yourself.'
+                      ? 'Browse the catalog to add your first plugin, or drop jars into the configuration folder yourself.'
                       : 'Try a different search or switch the filter back to All.'
                   }
                 />
               </CardContent>
             ) : (
-              <ScrollArea className='max-h-[34rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
+              <ScrollArea className='h-[34rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
                 <div className='divide-y'>
                   {visibleInstalled.map((entry) => (
                     <InstalledRow
@@ -275,7 +275,7 @@ export function ModsPanel({ profileId }: { profileId: string }) {
                 <EmptyState
                   icon={Package}
                   title='No catalog for this loader'
-                  description='Vanilla profiles take no plugins or mods. Use a Paper or Fabric profile to browse the catalog.'
+                  description='Vanilla configurations take no plugins or mods. Use a Paper or Fabric configuration to browse the catalog.'
                 />
               </CardContent>
             </Card>
@@ -284,10 +284,10 @@ export function ModsPanel({ profileId }: { profileId: string }) {
               <CardHeader className='border-b bg-muted/30 px-4 py-3'>
                 <CardTitle className='text-base'>Available for {query.data?.loader}</CardTitle>
                 <CardDescription>
-                  Filtered to versions this loader accepts. Installing adds the jar to the profile, so every instance that uses it picks it up on next restart.
+                  Filtered to versions this loader accepts. Installing adds the jar to the configuration, so every server that uses it picks it up on next restart.
                 </CardDescription>
               </CardHeader>
-              <ScrollArea className='max-h-[34rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
+              <ScrollArea className='h-[34rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
                 <div className='divide-y'>
                   {visibleCatalog.map((entry) => (
                     <CatalogRow
@@ -320,14 +320,14 @@ export function ModsPanel({ profileId }: { profileId: string }) {
           <div>
             <p className='font-medium'>2. Place</p>
             <p className='mt-1 text-muted-foreground'>
-              Written to the profile's <code className='text-xs'>{loaderIsPlugin ? '/plugins' : '/mods'}</code> folder.
+              Written to the configuration's <code className='text-xs'>{loaderIsPlugin ? '/plugins' : '/mods'}</code> folder.
               Disabled jars move to a <code className='text-xs'>.disabled</code> folder.
             </p>
           </div>
           <div>
             <p className='font-medium'>3. Restart</p>
             <p className='mt-1 text-muted-foreground'>
-              Every instance using this profile is flagged out of date and picks the change up on its next restart.
+              Every server using this configuration is flagged out of date and picks the change up on its next restart.
             </p>
           </div>
           <Separator className='sm:col-span-3' />

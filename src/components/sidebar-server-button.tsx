@@ -4,16 +4,20 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from '@sunstead/ui/components/resizable-sidebar';
+import { ServerStateDot } from '#/components/server-state';
+import type { ServerState } from '#/api/types';
 import { Box, MoreVertical } from 'lucide-react';
 
-export function SidebarServerButton({
+export function SidebarInstanceButton({
   name,
   version,
+  state,
   active = false,
   onClick,
 }: {
   name: string;
   version: string;
+  state: ServerState;
   active?: boolean;
   onClick: () => void;
 }) {
@@ -32,11 +36,7 @@ export function SidebarServerButton({
             <p className='truncate text-base text-foreground'>{name}</p>
             <p className='truncate text-sm text-muted-foreground'>{version}</p>
           </div>
-          <span
-            role='img'
-            aria-label='Online'
-            className='size-2 shrink-0 rounded-full bg-green-500'
-          />
+          <ServerStateDot state={state} className='size-2.5' />
         </div>
       </SidebarMenuButton>
       <SidebarMenuAction

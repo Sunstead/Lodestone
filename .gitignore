@@ -1,0 +1,14 @@
+.DS_Store
+node_modules/
+
+# Rust
+backend/target/
+
+# Local Lodestone data used by dev modes and tests
+.lodestone-dev/
+.lodestone-e2e/
+
+# Playwright
+e2e/test-results/
+e2e/playwright-report/
+e2e/.cache/

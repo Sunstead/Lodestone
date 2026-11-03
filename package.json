@@ -1,0 +1,16 @@
+{
+  "name": "lodestone",
+  "private": true,
+  "description": "Mirrors the main justfile recipes for machines without `just`.",
+  "scripts": {
+    "setup": "npm --prefix frontend install && npm --prefix e2e install && cd e2e && npx playwright install chromium",
+    "dev:demo": "cd frontend && VITE_LODESTONE_MODE=demo npm run dev",
+    "dev:fake": "node scripts/dev.mjs fake",
+    "dev": "node scripts/dev.mjs real",
+    "test": "cd backend && cargo test && cd ../frontend && npm run typecheck && npm test",
+    "test:contract": "node scripts/with-backend.mjs -- npm --prefix frontend test -- src/api/contract.test.ts",
+    "e2e": "npm --prefix frontend run build:live && cd e2e && npx playwright test",
+    "gen-types": "cd backend && cargo test --quiet --lib export_bindings",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

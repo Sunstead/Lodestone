@@ -6,6 +6,7 @@ const STATE_META: Record<
   ServerState,
   { label: string; dot: string; text: string; pulse?: boolean }
 > = {
+  preparing: { label: 'Preparing', dot: 'bg-sky-500', text: 'text-sky-500', pulse: true },
   running: { label: 'Online', dot: 'bg-green-500', text: 'text-green-500' },
   starting: { label: 'Starting', dot: 'bg-yellow-500', text: 'text-yellow-500', pulse: true },
   stopping: { label: 'Stopping', dot: 'bg-yellow-500', text: 'text-yellow-500', pulse: true },

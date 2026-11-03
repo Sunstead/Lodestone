@@ -1,0 +1,78 @@
+//! Server software resolution: which versions exist, which Java they need,
+//! and what to download to run them. Nothing is bundled with Lodestone;
+//! every jar comes from its publisher at runtime.
+
+pub mod fake;
+
+use async_trait::async_trait;
+
+use crate::cache::Artifact;
+use crate::error::{AppError, AppResult};
+use crate::model::{ServerSoftwareId, SoftwareCatalog};
+
+/// How to launch a resolved server.
+#[derive(Debug, Clone)]
+pub enum Launch {
+    /// `java ... -jar server.jar`: vanilla, Paper, Fabric's server launcher.
+    Jar(Artifact),
+}
+
+#[async_trait]
+pub trait SoftwareProvider: Send + Sync {
+    /// `real` or `fake`, reported on `/system`.
+    fn kind(&self) -> &'static str;
+
+    /// Every software and version Lodestone can run, newest first.
+    async fn catalog(&self) -> AppResult<SoftwareCatalog>;
+
+    /// The artifact(s) to run `software` at Minecraft `version`.
+    async fn resolve(&self, software: ServerSoftwareId, version: &str) -> AppResult<Launch>;
+}
+
+/// The Java major version a catalog entry needs.
+pub fn java_major(catalog: &SoftwareCatalog, software: ServerSoftwareId, version: &str) -> AppResult<u32> {
+    let option = catalog
+        .software
+        .iter()
+        .find(|option| option.id == software)
+        .ok_or_else(|| AppError::bad_request(format!("{} is not available.", software.label())))?;
+    option
+        .versions
+        .iter()
+        .find(|entry| entry.version == version)
+        .map(|entry| entry.java_major)
+        .ok_or_else(|| AppError::bad_request(format!("{} does not publish Minecraft {version}.", option.label)))
+}
+
+/// Java Mojang requires for a release, used when a provider does not say.
+pub fn java_for_minecraft(version: &str) -> u32 {
+    let parts: Vec<u32> = version.split('.').filter_map(|part| part.parse().ok()).collect();
+    let (minor, patch) = (parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0));
+    match (minor, patch) {
+        (m, _) if m >= 21 => 21,
+        (20, p) if p >= 5 => 21,
+        (m, _) if m >= 18 => 17,
+        (17, _) => 16,
+        _ => 8,
+    }
+}
+
+/// The stock JRE image for a Java major version.
+pub fn image_for(java_major: u32) -> String {
+    format!("eclipse-temurin:{java_major}-jre")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn java_versions_follow_mojang() {
+        assert_eq!(java_for_minecraft("1.21.4"), 21);
+        assert_eq!(java_for_minecraft("1.20.6"), 21);
+        assert_eq!(java_for_minecraft("1.20.4"), 17);
+        assert_eq!(java_for_minecraft("1.18.2"), 17);
+        assert_eq!(java_for_minecraft("1.17.1"), 16);
+        assert_eq!(java_for_minecraft("1.12.2"), 8);
+    }
+}

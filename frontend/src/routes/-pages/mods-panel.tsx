@@ -40,6 +40,7 @@ const SOURCE_LABEL: Record<ModEntry['source'], string> = {
   curseforge: 'CurseForge',
   hangar: 'Hangar',
   'built-in': 'Bundled',
+  upload: 'Uploaded',
 };
 
 function InstalledRow({

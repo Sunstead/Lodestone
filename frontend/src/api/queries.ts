@@ -7,6 +7,7 @@
  * denormalised labels stay honest.
  */
 
+import { useEffect, useState } from 'react';
 import {
   useMutation,
   useQuery,
@@ -29,6 +30,16 @@ import type {
   ServerAction,
   ServerPlayers,
   SoftwareCatalog,
+  AppSettings,
+  Job,
+  LodestoneEvent,
+  PlayerAction,
+  SystemInfo,
+  UpdateInstanceRequest,
+  UpdateProfileRequest,
+  UpdateScheduleRequest,
+  UpdateSettingsRequest,
+  UpdateWorldRequest,
   World,
   WorldStatus,
 } from './types';
@@ -50,7 +61,104 @@ export const keys = {
   instanceStatus: (id: string) => ['instances', id, 'status'] as const,
   instancePlayers: (id: string) => ['instances', id, 'players'] as const,
   console: (id: string) => ['instances', id, 'console'] as const,
+
+  backups: ['backups'] as const,
+  jobs: ['jobs'] as const,
+  settings: ['settings'] as const,
+  system: ['system'] as const,
 };
+
+/* -------------------------------- events ------------------------------- */
+
+/** Which cached queries an event makes stale. */
+export function keysForEvent(event: LodestoneEvent): readonly (readonly string[])[] {
+  switch (event.type) {
+    case 'changed':
+    case 'deleted':
+      switch (event.resource) {
+        case 'worlds':
+          return [keys.worlds, keys.instances, keys.backups];
+        case 'profiles':
+          return [keys.profiles, keys.instances];
+        case 'instances':
+          return [keys.instances, keys.worlds];
+        case 'backups':
+          return event.type === 'changed' && event.id ? [keys.worldBackups(event.id), keys.backups] : [keys.backups, keys.worlds];
+        case 'settings':
+          return [keys.settings, keys.system];
+      }
+      return [];
+    case 'instanceState':
+      return [keys.instance(event.id), keys.instanceStatus(event.id), keys.instances];
+    case 'job':
+      return [keys.jobs];
+  }
+}
+
+/**
+ * Subscribes to the backend's change feed and invalidates the matching
+ * queries, so lists and detail pages update without polling. Mount once.
+ */
+export function useEventStream(): void {
+  const queryClient = useQueryClient();
+  // The mode settles after the first `/health` probe; subscribe once it is live.
+  const [mode, setMode] = useState(api.getMode());
+  useEffect(() => {
+    const unsubscribe = api.onModeChange(setMode);
+    return () => void unsubscribe();
+  }, []);
+  useEffect(() => {
+    if (mode !== 'live') return;
+    return api.subscribeEvents(
+      (event) => {
+        if (event.type === 'job') {
+          queryClient.setQueryData<Job[]>(keys.jobs, (jobs) => [
+            event.job,
+            ...(jobs ?? []).filter((job) => job.id !== event.job.id),
+          ]);
+        }
+        for (const key of keysForEvent(event)) void queryClient.invalidateQueries({ queryKey: key });
+      },
+      // On (re)connect anything may have changed, including demo → live.
+      () => void queryClient.invalidateQueries(),
+    );
+  }, [queryClient, mode]);
+}
+
+/* ---------------------------- settings / system ------------------------ */
+
+export function useSettings(): UseQueryResult<AppSettings> {
+  return useQuery({ queryKey: keys.settings, queryFn: api.getSettings });
+}
+
+export function useUpdateSettings(): UseMutationResult<AppSettings, Error, UpdateSettingsRequest> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.updateSettings,
+    onSuccess: (data) => {
+      queryClient.setQueryData(keys.settings, data);
+      void queryClient.invalidateQueries({ queryKey: keys.instances });
+    },
+  });
+}
+
+export function useSystem(): UseQueryResult<SystemInfo> {
+  return useQuery({ queryKey: keys.system, queryFn: api.getSystem, refetchInterval: 10_000 });
+}
+
+export function useJobs(): UseQueryResult<Job[]> {
+  return useQuery({ queryKey: keys.jobs, queryFn: api.listJobs });
+}
+
+/** The job currently working on an asset, if any. */
+export function useActiveJob(targetId: string | null | undefined): Job | undefined {
+  const jobs = useJobs();
+  return jobs.data?.find((job) => job.targetId === targetId && (job.state === 'running' || job.state === 'queued'));
+}
+
+export function useAllBackups(): UseQueryResult<Backup[]> {
+  return useQuery({ queryKey: keys.backups, queryFn: api.listAllBackups, refetchInterval: 30_000 });
+}
 
 /* -------------------------------- worlds ------------------------------- */
 
@@ -79,10 +187,10 @@ export function useCreateWorld(): UseMutationResult<World, Error, CreateWorldReq
   });
 }
 
-export function useUpdateWorld(worldId: string): UseMutationResult<World, Error, Partial<CreateWorldRequest>> {
+export function useUpdateWorld(worldId: string): UseMutationResult<World, Error, UpdateWorldRequest> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: Partial<CreateWorldRequest>) => api.updateWorld(worldId, body),
+    mutationFn: (body: UpdateWorldRequest) => api.updateWorld(worldId, body),
     onSuccess: (data) => {
       queryClient.setQueryData(keys.world(worldId), data);
       void queryClient.invalidateQueries({ queryKey: keys.worlds });
@@ -134,10 +242,10 @@ export function useCreateProfile(): UseMutationResult<Profile, Error, CreateProf
   });
 }
 
-export function useUpdateProfile(profileId: string): UseMutationResult<Profile, Error, Partial<CreateProfileRequest>> {
+export function useUpdateProfile(profileId: string): UseMutationResult<Profile, Error, UpdateProfileRequest> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: Partial<CreateProfileRequest>) => api.updateProfile(profileId, body),
+    mutationFn: (body: UpdateProfileRequest) => api.updateProfile(profileId, body),
     onSuccess: (data) => {
       queryClient.setQueryData(keys.profile(profileId), data);
       void queryClient.invalidateQueries({ queryKey: keys.profiles });
@@ -180,7 +288,11 @@ export function useSaveProfileProperties(
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (changes: Record<string, string>) => api.saveProfileProperties(profileId, changes),
-    onSuccess: (data) => queryClient.setQueryData(keys.profileProperties(profileId), data),
+    onSuccess: (data) => {
+      queryClient.setQueryData(keys.profileProperties(profileId), data);
+      // Whitelist flags and max players show on instances.
+      void queryClient.invalidateQueries({ queryKey: keys.instances });
+    },
   });
 }
 
@@ -259,10 +371,10 @@ export function useCreateInstance(): UseMutationResult<Instance, Error, CreateIn
   });
 }
 
-export function useUpdateInstance(instanceId: string): UseMutationResult<Instance, Error, Partial<CreateInstanceRequest>> {
+export function useUpdateInstance(instanceId: string): UseMutationResult<Instance, Error, UpdateInstanceRequest> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: Partial<CreateInstanceRequest>) => api.updateInstance(instanceId, body),
+    mutationFn: (body: UpdateInstanceRequest) => api.updateInstance(instanceId, body),
     onSuccess: (data) => {
       queryClient.setQueryData(keys.instance(instanceId), data);
       void queryClient.invalidateQueries({ queryKey: keys.instances });
@@ -339,10 +451,10 @@ export function usePlayers(instanceId: string): UseQueryResult<ServerPlayers> {
 
 export function usePlayerAction(
   instanceId: string,
-): UseMutationResult<ServerPlayers, Error, { action: string; name: string; reason?: string }> {
+): UseMutationResult<ServerPlayers, Error, PlayerAction> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: { action: string; name: string; reason?: string }) => api.postPlayerAction(instanceId, body),
+    mutationFn: (body: PlayerAction) => api.postPlayerAction(instanceId, body),
     onSuccess: (data) => {
       queryClient.setQueryData(keys.instancePlayers(instanceId), data);
       void queryClient.invalidateQueries({ queryKey: keys.instanceStatus(instanceId) });
@@ -390,10 +502,10 @@ export function useRestoreBackup(worldId: string): UseMutationResult<void, Error
 
 export function usePatchSchedule(
   worldId: string,
-): UseMutationResult<BackupIndex, Error, Partial<BackupIndex['schedule']>> {
+): UseMutationResult<BackupIndex, Error, UpdateScheduleRequest> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (body: Partial<BackupIndex['schedule']>) => api.patchSchedule(worldId, body),
+    mutationFn: (body: UpdateScheduleRequest) => api.patchSchedule(worldId, body),
     onSuccess: (data) => queryClient.setQueryData(keys.worldBackups(worldId), data),
   });
 }

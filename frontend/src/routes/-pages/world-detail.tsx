@@ -8,7 +8,6 @@ import {
   CardTitle,
 } from '@sunstead/ui/components/card';
 import { Input } from '@sunstead/ui/components/input';
-import { Progress } from '@sunstead/ui/components/progress';
 import {
   Select,
   SelectContent,
@@ -263,17 +262,12 @@ export function WorldDetailPage({
           {
             label: 'On disk',
             value: formatBytes(data.sizeBytes, 1),
-            hint: live ? `${formatNumber(live.chunks)} chunks` : undefined,
-          },
-          {
-            label: 'Entities',
-            value: live ? formatNumber(live.entities) : '—',
-            hint: live ? `${formatNumber(live.blockEntities)} block entities` : undefined,
+            hint: data.layout === 'bukkit' ? 'Paper layout' : 'Vanilla layout',
           },
           {
             label: 'In-game day',
-            value: live ? formatNumber(live.day) : '—',
-            hint: live?.timeOfDay,
+            value: live?.day != null ? formatNumber(live.day) : '—',
+            hint: live?.timeOfDay ?? (live?.attached ? undefined : 'Shown while the world runs'),
           },
           {
             label: 'Players',
@@ -491,11 +485,13 @@ export function WorldDetailPage({
               <CardDescription>Where the world lives on the host.</CardDescription>
             </CardHeader>
             <CardContent className='space-y-3'>
-              <Progress value={live ? Math.min(100, live.chunks / 1000) : 0} aria-label='Chunks generated' />
               <div className='divide-y'>
-                <KeyValue label='Chunks' value={live ? formatNumber(live.chunks) : '—'} />
-                <KeyValue label='Entities' value={live ? formatNumber(live.entities) : '—'} />
-                <KeyValue label='Block entities' value={live ? formatNumber(live.blockEntities) : '—'} />
+                <KeyValue label='Generated' value={data.generated ? 'Yes' : 'Not yet — generates on first start'} />
+                <KeyValue
+                  label='Layout'
+                  value={data.layout === 'bukkit' ? 'Paper (dimensions in sibling folders)' : 'Vanilla (one folder)'}
+                />
+                <KeyValue label='Nether / End' value={live ? `${live.dimensions.nether ? 'Yes' : 'No'} / ${live.dimensions.end ? 'Yes' : 'No'}` : '—'} />
                 <KeyValue label='Disk' value={formatBytes(live?.diskBytes ?? data.sizeBytes, 1)} />
               </div>
               <p className='flex items-center gap-2 text-xs text-muted-foreground'>

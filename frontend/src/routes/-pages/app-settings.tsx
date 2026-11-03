@@ -18,11 +18,14 @@ import { Separator } from '@sunstead/ui/components/separator';
 import { Switch } from '@sunstead/ui/components/switch';
 import { THEMES, themesOf } from '@sunstead/ui/themes';
 import { useTheme } from '@sunstead/ui/use-theme';
-import { detectMode, getMode, onModeChange } from '#/api/client';
+import { Input } from '@sunstead/ui/components/input';
+import { detectMode, getMode, isBackendReachable, onModeChange } from '#/api/client';
+import { useSettings, useSystem, useUpdateSettings } from '#/api/queries';
 import type { ApiMode } from '#/api/types';
+import { formatBytes } from '#/lib/format';
 import { KeyValue, SectionHeading } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
-import { Palette, RefreshCw, Server, ShieldCheck } from 'lucide-react';
+import { Globe, Palette, RefreshCw, Scale, Server, ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 /**
@@ -32,12 +35,24 @@ import { useEffect, useState } from 'react';
 export function AppSettingsPage() {
   const { themeId, setThemeId, followSystem, setFollowSystem } = useTheme();
   const [mode, setMode] = useState<ApiMode>(getMode());
+  const [reachable, setReachable] = useState(isBackendReachable());
+  const settings = useSettings();
+  const updateSettings = useUpdateSettings();
+  const system = useSystem();
+  const [address, setAddress] = useState('');
 
   useEffect(() => {
-    const unsubscribe = onModeChange(setMode);
+    const unsubscribe = onModeChange((next) => {
+      setMode(next);
+      setReachable(isBackendReachable());
+    });
     void detectMode();
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (settings.data) setAddress(settings.data.publicAddress);
+  }, [settings.data]);
 
   const darkThemes = themesOf('dark');
   const lightThemes = themesOf('light');
@@ -124,19 +139,21 @@ export function AppSettingsPage() {
             <CardContent className='space-y-3'>
               <div className='flex items-center justify-between gap-3'>
                 <span className='text-sm text-muted-foreground'>Mode</span>
-                <Badge variant={mode === 'live' ? 'default' : 'secondary'}>
-                  {mode === 'live' ? 'Live API' : 'Demo data'}
+                <Badge variant={mode === 'live' && reachable !== false ? 'default' : 'secondary'}>
+                  {mode === 'demo' ? 'Demo data' : reachable === false ? 'Offline' : 'Live API'}
                 </Badge>
               </div>
               <p className='text-sm text-muted-foreground'>
-                {mode === 'live'
-                  ? 'Connected to the Rust backend. Changes are persisted.'
-                  : 'The Rust backend is unreachable, so everything is served by the in-memory demo store.'}
+                {mode === 'demo'
+                  ? 'Showing in-memory demo data. Nothing you do here runs a real server.'
+                  : reachable === false
+                    ? 'The Lodestone backend is not answering. Start it, then recheck.'
+                    : 'Connected to the Lodestone backend. Changes are persisted.'}
               </p>
               <BevelButton
                 tone='gray'
                 className='w-full px-4 py-4 text-sm'
-                onClick={() => void detectMode()}
+                onClick={() => void detectMode(true)}
               >
                 <RefreshCw />
                 Recheck connection
@@ -152,13 +169,85 @@ export function AppSettingsPage() {
               <CardDescription>What Lodestone manages your servers with.</CardDescription>
             </CardHeader>
             <CardContent className='divide-y'>
-              <KeyValue label='Container runtime' value='Docker Engine' />
-              <KeyValue label='Metadata store' value='SQLite' />
-              <KeyValue label='World isolation' value='One world, one server' />
-              <KeyValue label='Backup format' value='gzipped tar' />
+              <KeyValue
+                label='Container runtime'
+                value={
+                  system.data
+                    ? `${system.data.runtime.kind}${system.data.runtime.version ? ` ${system.data.runtime.version}` : ''}${system.data.runtime.available ? '' : ' (unavailable)'}`
+                    : '—'
+                }
+              />
+              <KeyValue label='Downloads from' value={system.data?.providers === 'real' ? 'Official sources' : (system.data?.providers ?? '—')} />
+              <KeyValue label='Data directory' value={<code className='text-xs break-all'>{system.data?.dataDir ?? '—'}</code>} />
+              <KeyValue label='Data on disk' value={system.data ? formatBytes(system.data.dataDirBytes, 1) : '—'} />
+              <KeyValue label='Backup format' value='tar + zstd' />
+              {system.data?.runtime.message ? (
+                <p className='pt-2 text-xs text-muted-foreground'>{system.data.runtime.message}</p>
+              ) : null}
             </CardContent>
           </Card>
         </div>
+      </div>
+
+      <div className='grid grid-cols-1 gap-4 xl:grid-cols-2'>
+        <Card>
+          <CardHeader>
+            <CardTitle className='flex items-center gap-2'>
+              <Scale className='size-4' /> Minecraft EULA
+            </CardTitle>
+            <CardDescription>
+              Lodestone downloads server software from Mojang and others when a server first starts. Servers
+              only run after you accept the{' '}
+              <a className='underline' href='https://aka.ms/MinecraftEULA' target='_blank' rel='noreferrer'>
+                Minecraft End User License Agreement
+              </a>
+              .
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='flex items-center justify-between gap-3'>
+            <label htmlFor='eula' className='text-sm'>
+              I have read and accept the Minecraft EULA
+            </label>
+            <Switch
+              id='eula'
+              checked={settings.data?.eulaAccepted ?? false}
+              disabled={!settings.data || updateSettings.isPending}
+              onCheckedChange={(checked: boolean) => updateSettings.mutate({ eulaAccepted: checked })}
+            />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className='flex items-center gap-2'>
+              <Globe className='size-4' /> Public address
+            </CardTitle>
+            <CardDescription>
+              The host name players type to connect. Shown on every server with its port. Leave blank for
+              localhost.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className='flex gap-2'>
+            <Input
+              aria-label='Public address'
+              placeholder='play.example.com'
+              value={address}
+              onChange={(event) => setAddress(event.target.value)}
+            />
+            <Button
+              variant='outline'
+              disabled={!settings.data || address === settings.data.publicAddress || updateSettings.isPending}
+              onClick={() => updateSettings.mutate({ publicAddress: address })}
+            >
+              Save
+            </Button>
+          </CardContent>
+          {updateSettings.error ? (
+            <p role='alert' className='px-6 pb-4 text-sm text-destructive'>
+              {updateSettings.error.message}
+            </p>
+          ) : null}
+        </Card>
       </div>
 
       <Card>
@@ -168,6 +257,10 @@ export function AppSettingsPage() {
         </CardHeader>
         <CardContent className='space-y-3 text-sm text-muted-foreground'>
           <p>
+            Nothing Minecraft-related ships with Lodestone. Server jars and Java come from their publishers
+            the first time a server needs them, are checked against the published hashes, and are cached.
+          </p>
+          <p>
             Worlds, configurations and servers are separate assets. Deleting a server never deletes the
             world it ran or the configuration it used.
           </p>
@@ -175,14 +268,6 @@ export function AppSettingsPage() {
             A world is mounted by at most one server at a time. Moving it to another server stops the
             container, remounts the data and starts again — the world itself is untouched.
           </p>
-          <div className='flex flex-wrap gap-2 pt-1'>
-            <Button variant='ghost' size='sm' disabled>
-              Export data
-            </Button>
-            <Button variant='ghost' size='sm' disabled>
-              Import data
-            </Button>
-          </div>
         </CardContent>
       </Card>
     </div>

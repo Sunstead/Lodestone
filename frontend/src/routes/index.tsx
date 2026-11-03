@@ -24,8 +24,16 @@ import { useEffect, useState } from 'react';
 import Plus from '@/assets/icons/plus.svg?react';
 import backgroundImg from '@/assets/wallpaper/wallpaper_minecraft_pc_bundle_2560x1440.png';
 
-import { detectMode, getMode, onModeChange } from '#/api/client';
-import { useDeleteInstance, useInstances, useInstanceAction, useInstanceStatus, useProfiles, useWorlds } from '#/api/queries';
+import { detectMode, getMode, isBackendReachable, onModeChange } from '#/api/client';
+import {
+  useDeleteInstance,
+  useEventStream,
+  useInstances,
+  useInstanceAction,
+  useInstanceStatus,
+  useProfiles,
+  useWorlds,
+} from '#/api/queries';
 import type { ApiMode, Instance } from '#/api/types';
 import { CreateInstanceDialog } from '#/components/create-instance-dialog';
 import { LaunchWorldDialog } from '#/components/launch-world-dialog';
@@ -82,13 +90,30 @@ export const Route = createFileRoute('/')({
 
 function DemoBadge() {
   const [mode, setMode] = useState<ApiMode>(getMode());
+  const [reachable, setReachable] = useState(isBackendReachable());
 
   useEffect(() => {
-    const unsubscribe = onModeChange(setMode);
+    const unsubscribe = onModeChange((next) => {
+      setMode(next);
+      setReachable(isBackendReachable());
+    });
     void detectMode();
     return unsubscribe;
   }, []);
 
+  if (mode === 'live' && reachable === false) {
+    return (
+      <button
+        type='button'
+        onClick={() => void detectMode(true)}
+        className='fixed right-3 bottom-3 z-50 flex items-center gap-1.5 rounded-md border border-red-500/40 bg-card/90 px-2.5 py-1 text-xs backdrop-blur'
+        title='The Lodestone backend is not answering. Click to retry.'
+      >
+        <span className='size-1.5 rounded-full bg-red-500' />
+        Backend offline · retry
+      </button>
+    );
+  }
   if (mode === 'live') return null;
 
   return (
@@ -104,6 +129,7 @@ function DemoBadge() {
 }
 
 function Home() {
+  useEventStream();
   const search = Route.useSearch();
   const navigate = useNavigate({ from: '/' });
   const instances = useInstances();

@@ -10,6 +10,7 @@ import { ServerStateBadge } from '#/components/server-state';
 import { formatBytes, formatNumber, percent } from '#/lib/format';
 import { Box, Cpu, Layers, MemoryStick, Users } from 'lucide-react';
 import type { Instance, InstanceStatus } from '#/api/types';
+import { useActiveJob } from '#/api/queries';
 
 /**
  * Bevel button that carries the Lodestone/Minecraft look from the hero
@@ -92,7 +93,8 @@ export function ServerHero({
   const online = playersOnline ?? status?.players.online ?? instance.players.online;
   const max = status?.players.max ?? instance.players.max;
   const running = state === 'running';
-  const transitioning = state === 'starting' || state === 'stopping';
+  const transitioning = state === 'starting' || state === 'stopping' || state === 'preparing';
+  const job = useActiveJob(instance.id);
 
   const metrics = [
     {
@@ -117,9 +119,14 @@ export function ServerHero({
     {
       label: 'Tick rate',
       icon: Box,
-      value: status && running ? status.tps.toFixed(2) : '—',
-      hint: status && running ? `${formatNumber(status.tickMs)} ms per tick` : undefined,
-      meter: status ? Math.min(100, (status.tickMs / 50) * 100) : 0,
+      value: status && running && status.tps !== null ? status.tps.toFixed(2) : '—',
+      hint:
+        status && running
+          ? status.tickMs !== null
+            ? `${formatNumber(status.tickMs)} ms per tick`
+            : 'Not reported by this server'
+          : undefined,
+      meter: status?.tickMs != null ? Math.min(100, (status.tickMs / 50) * 100) : 0,
     },
   ];
 
@@ -165,6 +172,20 @@ export function ServerHero({
               </button>
               <span className='text-sm font-semibold text-foreground/70 text-shadow-lg'>{instance.address}</span>
             </div>
+            {state === 'preparing' ? (
+              <p className='text-sm font-medium text-foreground text-shadow-lg' role='status'>
+                {job?.message ?? 'Preparing…'}
+                {job?.progress != null ? ` · ${Math.round(job.progress * 100)}%` : ''}
+              </p>
+            ) : null}
+            {state === 'error' && instance.lastError ? (
+              <p
+                role='alert'
+                className='max-w-3xl rounded bg-red-950/70 px-3 py-2 text-sm text-red-100 ring-1 ring-red-500/40 backdrop-blur'
+              >
+                {instance.lastError}
+              </p>
+            ) : null}
           </div>
         </div>
 

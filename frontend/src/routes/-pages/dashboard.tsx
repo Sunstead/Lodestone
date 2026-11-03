@@ -317,11 +317,17 @@ export function DashboardPage({
         <StatCard
           title='Tick rate'
           icon={Gauge}
-          value={running ? live.tps.toFixed(2) : '—'}
+          value={running && live.tps !== null ? live.tps.toFixed(2) : '—'}
           unit='TPS'
-          percentValue={running ? Math.min(100, (live.tickMs / 50) * 100) : 0}
+          percentValue={running && live.tickMs !== null ? Math.min(100, (live.tickMs / 50) * 100) : 0}
           meterLabel='Tick time budget used'
-          footnote={running ? `Average tick ${formatNumber(live.tickMs)} ms (budget 50 ms)` : 'Server not running'}
+          footnote={
+            !running
+              ? 'Server not running'
+              : live.tickMs !== null
+                ? `Average tick ${formatNumber(live.tickMs)} ms (budget 50 ms)`
+                : 'This server does not report tick timing (Vanilla before 1.20.3)'
+          }
         />
       </section>
 

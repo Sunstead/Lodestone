@@ -23,16 +23,11 @@ import {
   SelectValue,
 } from '@sunstead/ui/components/select';
 import { Separator } from '@sunstead/ui/components/separator';
-import { useQueryClient } from '@tanstack/react-query';
 import {
   useCreateInstance,
-  useCreateProfile,
-  useCreateWorld,
-  useInstances,
   useSoftware,
   useWorlds,
 } from '#/api/queries';
-import { runAction } from '#/api/client';
 import type {
   CreateInstanceRequest,
   CreateProfileRequest,
@@ -102,12 +97,8 @@ export function LaunchWorldDialog({
   onLaunched: (instanceId: string) => void;
 }) {
   const worlds = useWorlds();
-  const instances = useInstances();
   const software = useSoftware();
-  const queryClient = useQueryClient();
   const createInstance = useCreateInstance();
-  const createProfile = useCreateProfile();
-  const createWorld = useCreateWorld();
 
   const [phase, setPhase] = useState<Phase>('configure');
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -126,8 +117,9 @@ export function LaunchWorldDialog({
     selectedSoftware?.versions.map((entry) => ({ value: entry.version, label: entry.version })) ?? [];
 
   const [maxMemory, setMaxMemory] = useState(4096);
-  const [minecraftPort, setMinecraftPort] = useState(25565);
-  const [rconPort, setRconPort] = useState(25575);
+  // `null` = let the backend pick a free port.
+  const [minecraftPort, setMinecraftPort] = useState<number | null>(null);
+  const [rconPort, setRconPort] = useState<number | null>(null);
 
   const [worldDraft, setWorldDraft] = useState<CreateWorldRequest>({
     name: '',
@@ -157,9 +149,8 @@ export function LaunchWorldDialog({
     const preselected = worldId && freeWorlds.some((world) => world.id === worldId) ? worldId : '';
     setSelectedWorldId(preselected || freeWorlds[0]?.id || '');
     setServerName('');
-    const nextPort = 25565 + (instances.data?.length ?? 0) * 2;
-    setMinecraftPort(nextPort);
-    setRconPort(nextPort + 10);
+    setMinecraftPort(null);
+    setRconPort(null);
     setWorldDraft((previous) => ({ ...previous, name: '' }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -177,7 +168,7 @@ export function LaunchWorldDialog({
     return worldDraft.name;
   }, [worldSource, freeWorlds, selectedWorldId, worldDraft.name]);
 
-  const busy = createInstance.isPending || createProfile.isPending || createWorld.isPending;
+  const busy = createInstance.isPending;
 
   const canLaunch =
     (worldSource === 'existing' ? selectedWorldId !== '' : worldDraft.name.trim().length > 0) &&
@@ -188,13 +179,7 @@ export function LaunchWorldDialog({
     setError(null);
     setPhase('launching');
     try {
-      let finalWorldId = selectedWorldId;
-      if (worldSource === 'new') {
-        const world = await createWorld.mutateAsync(worldDraft);
-        finalWorldId = world.id;
-      }
-
-      const profileBody: CreateProfileRequest = {
+      const newProfile: CreateProfileRequest = {
         name: `${selectedSoftware?.label ?? softwareId} ${version} · ${suggestedName || serverName}`.trim(),
         description: 'Created by the Launch world flow',
         softwareId,
@@ -202,27 +187,25 @@ export function LaunchWorldDialog({
         memory: { minMb: Math.min(2048, maxMemory), maxMb: maxMemory, initialMb: Math.min(2048, maxMemory) },
         cpuCores: null,
         javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=200',
-        autoStart: true,
+        autoStart: false,
         restartOnCrash: true,
         crashThreshold: 3,
       };
-      const profile = await createProfile.mutateAsync(profileBody);
-
+      // World, configuration and instance are created in one transaction
+      // and started, so a failure never leaves orphans behind.
       const body: CreateInstanceRequest = {
         name: serverName.trim() || suggestedName.trim(),
-        profileId: profile.id,
-        worldId: finalWorldId,
-        minecraftPort,
-        rconPort,
-        queryPort: null,
+        ...(worldSource === 'new' ? { newWorld: worldDraft } : { worldId: selectedWorldId }),
+        newProfile,
+        ...(minecraftPort !== null ? { minecraftPort } : {}),
+        ...(rconPort !== null ? { rconPort } : {}),
+        start: true,
       };
       const instance = await createInstance.mutateAsync(body);
       setCreated(instance);
-      await runAction(instance.id, 'start');
-      void queryClient.invalidateQueries({ queryKey: ['instances'] });
       setPhase('done');
-    } catch {
-      setError('Something went wrong while launching. Check the configuration and try again.');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Something went wrong while launching.');
       setPhase('configure');
     }
   };
@@ -495,9 +478,10 @@ export function LaunchWorldDialog({
                       <Input
                         id='launch-mc-port'
                         type='number'
-                        value={minecraftPort}
+                        value={minecraftPort ?? ''}
+                        placeholder='auto'
                         className='tabular-nums'
-                        onChange={(event) => setMinecraftPort(Number(event.target.value))}
+                        onChange={(event) => setMinecraftPort(event.target.value === '' ? null : Number(event.target.value))}
                       />
                     </Field>
                     <Field>
@@ -505,9 +489,10 @@ export function LaunchWorldDialog({
                       <Input
                         id='launch-rcon-port'
                         type='number'
-                        value={rconPort}
+                        value={rconPort ?? ''}
+                        placeholder='auto'
                         className='tabular-nums'
-                        onChange={(event) => setRconPort(Number(event.target.value))}
+                        onChange={(event) => setRconPort(event.target.value === '' ? null : Number(event.target.value))}
                       />
                     </Field>
                   </div>

@@ -29,8 +29,8 @@ import {
   TableHeader,
   TableRow,
 } from '@sunstead/ui/components/table';
-import { usePlayerAction, usePlayers } from '#/api/queries';
-import type { Player } from '#/api/types';
+import { useInstance, usePlayerAction, usePlayers, useSaveProfileProperties } from '#/api/queries';
+import type { Player, PlayerAction } from '#/api/types';
 import { EmptyState, SectionHeading, StatStrip } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
 import { formatDuration, formatPlaytime, formatPing, formatRelative, pingTone } from '#/lib/format';
@@ -59,7 +59,7 @@ function PlayerRow({
   pending,
 }: {
   player: Player;
-  onAction: (action: string, reason?: string) => void;
+  onAction: (action: PlayerAction['action'], reason?: string) => void;
   pending: boolean;
 }) {
   const [confirm, setConfirm] = useState<'ban' | 'kick' | null>(null);
@@ -223,6 +223,8 @@ function Dialog({
 export function PlayersPage({ instanceId }: { instanceId: string }) {
   const query = usePlayers(instanceId);
   const action = usePlayerAction(instanceId);
+  const instance = useInstance(instanceId);
+  const saveProperties = useSaveProfileProperties(instance.data?.profileId ?? '');
   const [filter, setFilter] = useState('');
   const [tab, setTab] = useState('all');
 
@@ -245,8 +247,12 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
       .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
   }, [players, tab, filter]);
 
-  const run = (name: string, playerAction: string, reason?: string) =>
-    action.mutate({ action: playerAction, name, reason });
+  const run = (name: string, playerAction: PlayerAction['action'], reason?: string) =>
+    action.mutate({ action: playerAction, name, reason } as PlayerAction);
+
+  // The whitelist switch is a property of the configuration (`white-list`).
+  const whitelistOn = query.data?.whitelistEnabled ?? false;
+  const toggleWhitelist = () => saveProperties.mutate({ 'white-list': whitelistOn ? 'false' : 'true' });
 
   return (
     <div className='mx-auto flex w-full min-w-0 max-w-[1600px] flex-col gap-4 p-4 md:p-6'>
@@ -266,16 +272,16 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
       <SectionHeading
         title='Players'
         icon={UserGroup}
-        description='Whitelist, operators and bans. Actions are sent over RCON so changes show up in the console immediately.'
+        description='Whitelist, operators and bans belong to the configuration, so every server using it shares them. While a server runs, changes apply immediately over RCON.'
         action={
           <Button
             variant='outline'
             size='sm'
-            disabled={action.isPending}
-            onClick={() => run('', query.data?.whitelistEnabled ? 'whitelist-remove' : 'whitelist-add')}
-            className=''
+            disabled={saveProperties.isPending || !instance.data}
+            onClick={toggleWhitelist}
+            title='Saved on the configuration; applies on the next start.'
           >
-            Toggle whitelist in console
+            {whitelistOn ? 'Turn whitelist off' : 'Turn whitelist on'}
           </Button>
         }
       />

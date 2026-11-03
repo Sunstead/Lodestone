@@ -44,7 +44,15 @@ import type {
   SoftwareCatalog,
   World,
   WorldStatus,
+  AppSettings,
+  SystemInfo,
+  UpdateInstanceRequest,
+  UpdateProfileRequest,
+  UpdateScheduleRequest,
+  UpdateSettingsRequest,
+  UpdateWorldRequest,
 } from './types';
+import schema from '../../../shared/server-properties.schema.json';
 
 /* ------------------------------------------------------------------ *
  * helpers
@@ -73,6 +81,17 @@ const slugify = (value: string): string => {
   return slug || 'world';
 };
 
+/** Java Mojang requires for a release (mirrors `software::java_for_minecraft`). */
+const javaFor = (version: string): number => {
+  const [, minor = 0, patch = 0] = version.split('.').map(Number);
+  if (minor >= 21 || (minor === 20 && patch >= 5)) return 21;
+  if (minor >= 18) return 17;
+  if (minor === 17) return 16;
+  return 8;
+};
+
+const imageFor = (version: string): string => `eclipse-temurin:${javaFor(version)}-jre`;
+
 const SOFTWARE_LABEL: Record<ServerSoftwareId, string> = {
   vanilla: 'Vanilla',
   paper: 'Paper',
@@ -91,252 +110,10 @@ const SOFTWARE_LABEL: Record<ServerSoftwareId, string> = {
 
 type FieldDef = Omit<PropertyField, 'value'>;
 
-const text = (
-  key: string,
-  label: string,
-  scope: PropertyScope,
-  group: string,
-  description: string,
-  defaultValue: string,
-  extra: Partial<FieldDef> = {},
-): FieldDef => ({ key, label, scope, group, description, defaultValue, control: 'text', ...extra });
+/** Field metadata lives in `shared/server-properties.schema.json`, shared with the Rust backend. */
+export const PROPERTY_DEFS: FieldDef[] = schema.fields as FieldDef[];
 
-const num = (
-  key: string,
-  label: string,
-  scope: PropertyScope,
-  group: string,
-  description: string,
-  defaultValue: string,
-  extra: Partial<FieldDef> = {},
-): FieldDef => ({ key, label, scope, group, description, defaultValue, control: 'number', ...extra });
-
-const toggle = (
-  key: string,
-  label: string,
-  scope: PropertyScope,
-  group: string,
-  description: string,
-  defaultValue: 'true' | 'false',
-  extra: Partial<FieldDef> = {},
-): FieldDef => ({ key, label, scope, group, description, defaultValue, control: 'switch', ...extra });
-
-const choice = (
-  key: string,
-  label: string,
-  scope: PropertyScope,
-  group: string,
-  description: string,
-  defaultValue: string,
-  options: { value: string; label: string }[],
-  extra: Partial<FieldDef> = {},
-): FieldDef => ({ key, label, scope, group, description, defaultValue, control: 'select', options, ...extra });
-
-const slider = (
-  key: string,
-  label: string,
-  scope: PropertyScope,
-  group: string,
-  description: string,
-  defaultValue: string,
-  min: number,
-  max: number,
-  unit?: string,
-  extra: Partial<FieldDef> = {},
-): FieldDef => ({
-  key,
-  label,
-  scope,
-  group,
-  description,
-  defaultValue,
-  control: 'slider',
-  min,
-  max,
-  step: 1,
-  unit,
-  ...extra,
-});
-
-const GAME_MODES = [
-  { value: 'survival', label: 'Survival' },
-  { value: 'creative', label: 'Creative' },
-  { value: 'adventure', label: 'Adventure' },
-  { value: 'spectator', label: 'Spectator' },
-];
-
-const DIFFICULTIES = [
-  { value: 'peaceful', label: 'Peaceful' },
-  { value: 'easy', label: 'Easy' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'hard', label: 'Hard' },
-];
-
-/**
- * World-scoped keys. Generation keys lock once the world has generated,
- * which the world editor enforces by disabling them.
- */
-const WORLD_DEFS: FieldDef[] = [
-  text('level-name', 'World folder', 'world', 'identity', 'Folder name on disk. Taken from the world asset — change it by renaming the world.', 'world', {
-    readOnly: true,
-    derivedFrom: 'world.folder',
-  }),
-  text('level-seed', 'World seed', 'world', 'generation', 'Used only the first time the world generates.', '', {
-    placeholder: 'blank = random',
-  }),
-  choice('level-type', 'World type', 'world', 'generation', 'Generation preset applied to a brand new world.', 'minecraft:normal', [
-    { value: 'minecraft:normal', label: 'Default' },
-    { value: 'minecraft:flat', label: 'Flat' },
-    { value: 'minecraft:amplified', label: 'Amplified' },
-    { value: 'minecraft:large_biomes', label: 'Large biomes' },
-  ]),
-  toggle('generate-structures', 'Generate structures', 'world', 'generation', 'Villages, strongholds, monuments and bastions.', 'true'),
-  num('max-world-size', 'World border', 'world', 'generation', 'Diameter of the world border in blocks.', '29999984', {
-    min: 1000,
-    max: 29999984,
-    unit: 'blocks',
-  }),
-  toggle('allow-nether', 'Allow Nether', 'world', 'dimensions', 'Create and permit travel to this world’s Nether.', 'true'),
-  choice('difficulty', 'Difficulty', 'world', 'gameplay', 'Hostile mob damage, hunger and health regen.', 'normal', DIFFICULTIES, {
-    appliesLive: true,
-  }),
-  choice('gamemode', 'Default gamemode', 'world', 'gameplay', 'Game mode given to players the first time they join.', 'survival', GAME_MODES, {
-    appliesLive: true,
-  }),
-  toggle('hardcore', 'Hardcore', 'world', 'gameplay', 'Deaths ban the player and lock the world in spectator mode.', 'false'),
-  toggle('force-gamemode', 'Force gamemode', 'world', 'gameplay', 'Reset every join to the default gamemode instead of restoring the last one.', 'false'),
-  toggle('pvp', 'Player vs player', 'world', 'gameplay', 'Players may damage each other.', 'true'),
-  toggle('allow-flight', 'Allow flight', 'world', 'gameplay', 'Tolerate clients that fly (Creative, elytra, modded). Off can trigger anticheat kicks.', 'false'),
-  toggle('enable-command-block', 'Command blocks', 'world', 'gameplay', 'Allow command blocks to execute commands.', 'true'),
-  num('spawn-protection', 'Spawn protection', 'world', 'spawn', 'Radius around spawn where only ops may break blocks. 0 turns it off.', '16', {
-    min: 0,
-    max: 1000,
-    unit: 'blocks',
-  }),
-  toggle('spawn-monsters', 'Hostile mobs', 'world', 'spawn', 'Hostile mobs spawn in the dark.', 'true'),
-  toggle('spawn-npcs', 'NPCs', 'world', 'spawn', 'Villagers and other NPCs spawn naturally.', 'true'),
-  text('initial-enabled-packs', 'Enabled data packs', 'world', 'datapacks', 'Data packs enabled the first time the world loads.', 'vanilla'),
-  text('initial-disabled-packs', 'Disabled data packs', 'world', 'datapacks', 'Data packs shipped in the world folder but left off.', ''),
-];
-
-/** Profile-scoped keys: software behaviour, access policy, tuning. */
-const PROFILE_DEFS: FieldDef[] = [
-  text('motd', 'Message of the day', 'profile', 'network', 'Shown in the multiplayer list. Supports § colour codes.', 'A Minecraft Server', {
-    placeholder: '§aMy Server §7| §fWelcome',
-  }),
-  num('max-players', 'Max players', 'profile', 'network', 'Player slots advertised in the server list ping. Does not kick anyone already online.', '20', {
-    min: 1,
-    max: 1000,
-  }),
-  toggle('online-mode', 'Online mode', 'profile', 'network', 'Authenticate names against Mojang sessions. Disable only when a proxy handles auth.', 'true'),
-  toggle('white-list', 'Whitelist', 'profile', 'access', 'Only whitelisted players may join. Manage the list in the Players tab.', 'false', {
-    appliesLive: true,
-  }),
-  toggle('enforce-whitelist', 'Enforce whitelist', 'profile', 'access', 'Kick players who are removed from the whitelist while online.', 'false', {
-    appliesLive: true,
-  }),
-  toggle('hide-online-players', 'Hide player list', 'profile', 'access', 'Do not reveal the online player list to server list pings.', 'false'),
-  num('player-idle-timeout', 'Idle timeout', 'profile', 'access', 'Kick players idle for this long. 0 never kicks.', '0', {
-    min: 0,
-    max: 43200,
-    unit: 'min',
-    appliesLive: true,
-  }),
-  toggle('enable-query', 'Query protocol', 'profile', 'network', 'Answer GameSpy4 query pings on the query port (used by server list scrapers).', 'false'),
-  num('query.port', 'Query port', 'profile', 'network', 'UDP port for the query protocol.', '25565', { min: 1, max: 65535 }),
-  slider('view-distance', 'View distance', 'profile', 'performance', 'Chunks sent to each client. The heaviest lever for CPU and bandwidth.', '10', 2, 32, 'chunks'),
-  slider('simulation-distance', 'Simulation distance', 'profile', 'performance', 'Chunks where mobs, crops and redstone actually tick.', '8', 2, 32, 'chunks'),
-  num('max-tick-time', 'Tick watchdog', 'profile', 'performance', 'Warn when one tick runs longer than this. -1 disables the watchdog.', '60000', {
-    min: -1,
-    max: 600000,
-    unit: 'ms',
-  }),
-  num('max-chained-neighbor-updates', 'Chained updates', 'profile', 'performance', 'Cap on block updates per tick, limits piston and observer loops.', '100000', {
-    min: 1000,
-    max: 1000000,
-  }),
-  num('network-compression-threshold', 'Compression threshold', 'profile', 'performance', 'Compress packets larger than this. 0 disables compression.', '256', {
-    min: 0,
-    max: 65536,
-    unit: 'bytes',
-  }),
-  toggle('sync-chunk-writes', 'Sync chunk writes', 'profile', 'performance', 'Flush chunks to disk synchronously. Faster off, safer on.', 'true'),
-  toggle('use-native-transport', 'Native transport', 'profile', 'performance', 'Linux only: use epoll for lower latency networking.', 'true'),
-  num('rate-limit', 'Rate limit', 'profile', 'performance', 'Drop packets from clients sending faster than this. 0 disables it.', '0', {
-    min: 0,
-    max: 100000,
-    unit: 'pkt/s',
-  }),
-  num('entity-broadcast-range-percentage', 'Broadcast range', 'profile', 'performance', 'How far entity updates reach clients. 100 matches the vanilla view radius.', '100', {
-    min: 10,
-    max: 1000,
-    unit: '%',
-  }),
-  toggle('enable-rcon', 'Enable RCON', 'profile', 'rcon', 'Expose RCON so Lodestone can send commands and read responses.', 'true'),
-  num('rcon.port', 'RCON port', 'profile', 'rcon', 'Published on loopback only — never reachable from the internet.', '25575', {
-    min: 1,
-    max: 65535,
-  }),
-  text('rcon.password', 'RCON password', 'profile', 'rcon', 'Shared with Lodestone and stored in SQLite. Never written to logs.', '', {
-    control: 'password',
-    sensitive: true,
-    placeholder: 'auto-generated',
-  }),
-  toggle('broadcast-rcon-to-ops', 'Broadcast RCON commands', 'profile', 'rcon', 'Show commands sent over RCON to online ops.', 'true'),
-  toggle('broadcast-console-to-ops', 'Broadcast console commands', 'profile', 'advanced', 'Show console commands to online ops.', 'true'),
-  toggle('enforce-secure-profile', 'Chat signing', 'profile', 'advanced', 'Enforce Mojang chat signing. Unsigned messages are rejected.', 'true'),
-  toggle('prevent-proxy-connections', 'Block proxies', 'profile', 'advanced', 'Reject connections from known proxy IP ranges.', 'false'),
-  toggle('honor-proxy-ips', 'Honour proxy IPs', 'profile', 'advanced', 'Trust forwarded IPs from a proxy sitting in front of the server.', 'true'),
-  toggle('log-ips', 'Log player IPs', 'profile', 'advanced', 'Write connecting addresses into the log file.', 'true'),
-  toggle('enable-jmx-monitoring', 'JMX monitoring', 'profile', 'advanced', 'Expose JVM metrics on localhost:9010.', 'false'),
-  toggle('track-random-splits', 'Track random splits', 'profile', 'advanced', 'Log RNG splits so bug reports can be reproduced.', 'false'),
-  text('text-filtering-config', 'Text filtering config', 'profile', 'advanced', 'File used to filter chat text. Blank disables filtering.', ''),
-  text('bug-report-link', 'Bug report link', 'profile', 'advanced', 'Shown to players when they file a crash report.', ''),
-  num('function-permission-level', 'Function permission level', 'profile', 'advanced', 'Permission level for functions and command block functions.', '2', {
-    min: 0,
-    max: 4,
-  }),
-  num('operator-user-permission-level', 'Op permission level', 'profile', 'advanced', 'Permission level granted when a player is made op in game.', '4', {
-    min: 0,
-    max: 4,
-  }),
-  toggle('require-resource-pack', 'Require resource pack', 'profile', 'advanced', 'Kick players who decline the resource pack.', 'false'),
-  text('resource-pack', 'Resource pack URL', 'profile', 'advanced', 'HTTPS URL of the pack pushed to clients on join.', ''),
-  text('resource-pack-prompt', 'Resource pack prompt', 'profile', 'advanced', 'Message shown when asking players to download the pack.', ''),
-  text('resource-pack-sha1', 'Resource pack SHA-1', 'profile', 'advanced', 'Hash of the pack. Required for modern clients to accept it.', ''),
-];
-
-/** Instance-scoped: published by the container, not the world or profile. */
-const INSTANCE_DEFS: FieldDef[] = [
-  num('server-port', 'Server port', 'instance', 'network', 'TCP port players connect to. Mapped into the container.', '25565', {
-    min: 1,
-    max: 65535,
-  }),
-  text('server-ip', 'Bind address', 'instance', 'network', 'Interface the server binds to. Leave blank to bind every interface.', '', {
-    placeholder: 'blank = all interfaces',
-  }),
-];
-
-export const PROPERTY_DEFS: FieldDef[] = [...WORLD_DEFS, ...PROFILE_DEFS, ...INSTANCE_DEFS];
-
-export const TYPE_GROUPS: Record<PropertyScope, { id: string; label: string; hint: string }[]> = {
-  world: [
-    { id: 'identity', label: 'Identity', hint: 'Folder on disk' },
-    { id: 'generation', label: 'Generation', hint: 'Locked once generated' },
-    { id: 'dimensions', label: 'Dimensions', hint: 'Nether and beyond' },
-    { id: 'gameplay', label: 'Gameplay', hint: 'Rules for this world' },
-    { id: 'spawn', label: 'Spawning', hint: 'Where things appear' },
-    { id: 'datapacks', label: 'Data packs', hint: 'Per-world packs' },
-  ],
-  profile: [
-    { id: 'network', label: 'Network', hint: 'Ports and motd' },
-    { id: 'access', label: 'Access', hint: 'Whitelist and idling' },
-    { id: 'performance', label: 'Performance', hint: 'Distance and tick load' },
-    { id: 'rcon', label: 'RCON', hint: 'Remote console' },
-    { id: 'advanced', label: 'Advanced', hint: 'Everything else' },
-  ],
-  instance: [{ id: 'network', label: 'Network', hint: 'Published ports' }],
-};
+export const TYPE_GROUPS = schema.groups as Record<PropertyScope, { id: string; label: string; hint: string }[]>;
 
 const GROUP_LABEL = new Map<string, string>(
   Object.values(TYPE_GROUPS)
@@ -1119,7 +896,7 @@ const INSTANCE_SEEDS: InstanceSeed[] = [
         swapUsedBytes: 0.2 * 1024 ** 3,
         swapTotalBytes: 2 * 1024 ** 3,
       },
-      container: { id: '8f2c41d09ab7', name: 'lodestone-survival-1', image: 'sunstead/minecraft:paper-1.21.4', healthy: true },
+      container: { id: '8f2c41d09ab7', name: 'lodestone-survival-1', image: 'eclipse-temurin:21-jre', healthy: true },
     },
     players: makePlayers(
       SURVIVAL_ONLINE,
@@ -1167,7 +944,7 @@ const INSTANCE_SEEDS: InstanceSeed[] = [
       state: 'stopped',
       players: { online: 0, max: 10 },
       memory: { usedBytes: 0, limitBytes: 4 * 1024 ** 3 },
-      container: { id: '—', name: 'lodestone-creative-1', image: 'sunstead/minecraft:vanilla-1.21.4', healthy: false },
+      container: { id: '—', name: 'lodestone-creative-1', image: 'eclipse-temurin:21-jre', healthy: false },
     }),
     players: makePlayers([], CREATIVE_OFFLINE, ['pixel_pete', 'buildmaster_bob', 'luma_builds']),
     consoleHistory: [
@@ -1207,7 +984,7 @@ const INSTANCE_SEEDS: InstanceSeed[] = [
         swapUsedBytes: 0.2 * 1024 ** 3,
         swapTotalBytes: 2 * 1024 ** 3,
       },
-      container: { id: 'c09ba31f7742', name: 'lodestone-modded-1', image: 'sunstead/minecraft:fabric-1.21.1', healthy: true },
+      container: { id: 'c09ba31f7742', name: 'lodestone-modded-1', image: 'eclipse-temurin:21-jre', healthy: true },
     },
     players: makePlayers(MODDED_ONLINE, MODDED_OFFLINE, MODDED_ONLINE.map((p) => p.name).concat(['brass_bandit'])),
     consoleHistory: [
@@ -1246,7 +1023,7 @@ const INSTANCE_SEEDS: InstanceSeed[] = [
       state: 'stopped',
       players: { online: 0, max: 20 },
       memory: { usedBytes: 0, limitBytes: 4 * 1024 ** 3 },
-      container: { id: '—', name: 'lodestone-nether-test-1', image: 'sunstead/minecraft:paper-1.21.4', healthy: false },
+      container: { id: '—', name: 'lodestone-nether-test-1', image: 'eclipse-temurin:21-jre', healthy: false },
     }),
     players: makePlayers([], [], []),
     consoleHistory: [
@@ -1269,7 +1046,8 @@ function hydrateProfile(seed: ProfileSeed): void {
     softwareId: seed.softwareId,
     software: SOFTWARE_LABEL[seed.softwareId],
     version: seed.version,
-    image: `sunstead/minecraft:${seed.softwareId}-${seed.version}`,
+    javaMajor: javaFor(seed.version),
+    image: imageFor(seed.version),
     memory: seed.memory,
     cpuCores: seed.cpuCores,
     javaArgs: seed.javaArgs,
@@ -1294,6 +1072,10 @@ function hydrateWorld(seed: WorldSeed): void {
     seed: seed.seed,
     generateStructures: seed.generateStructures,
     generated: seed.generated,
+    layout: INSTANCE_SEEDS.some((instance) => instance.worldId === seed.id && PROFILE_SEEDS.find((p) => p.id === instance.profileId)?.softwareId === 'paper')
+      ? 'bukkit'
+      : 'vanilla',
+    dataVersion: seed.generated ? 4189 : null,
     maxWorldSize: seed.maxWorldSize,
     allowNether: seed.allowNether,
     difficulty: seed.difficulty,
@@ -1315,9 +1097,6 @@ function hydrateWorld(seed: WorldSeed): void {
     worldId: seed.id,
     attached: attached !== null,
     diskBytes: seed.sizeBytes,
-    chunks: seed.status.chunks,
-    entities: seed.status.entities,
-    blockEntities: seed.status.blockEntities,
     day: seed.status.day,
     timeOfDay: seed.status.timeOfDay,
     dimensions: { nether: seed.allowNether, end: false },
@@ -1380,10 +1159,12 @@ function hydrateInstance(seed: InstanceSeed): void {
     worldId: seed.worldId,
     state: seed.state,
     players: seed.status.players ?? { online: 0, max: 20 },
-    address: `play.sunstead.gg:${seed.ports.minecraft}`,
+    address: seed.ports.minecraft === 25565 ? 'localhost' : `localhost:${seed.ports.minecraft}`,
     ports: seed.ports,
     environment: seed.environment,
     createdAt: seed.createdAt,
+    lastError: null,
+    jobId: null,
     profile: { name: profile.profile.name, software: profile.profile.software, version: profile.profile.version },
     world: { name: world.world.name, folder: world.world.folder },
   };
@@ -1415,8 +1196,8 @@ function drift(instance: DemoInstance): void {
   if (status.state !== 'running') {
     status.memory.usedBytes = 0;
     status.cpuPercent = 0;
-    status.tps = 0;
-    status.tickMs = 0;
+    status.tps = null;
+    status.tickMs = null;
     status.network.rxPerSec = 0;
     status.network.txPerSec = 0;
     status.players.online = 0;
@@ -1432,8 +1213,8 @@ function drift(instance: DemoInstance): void {
   );
   status.cpuPercent = Math.round(jitter(status.cpuPercent, 7, 8, 96));
   status.host.cpuPercent = status.cpuPercent;
-  status.tps = Number(jitter(status.tps, 0.06, 17.8, 20).toFixed(2));
-  status.tickMs = Math.round(jitter(status.tickMs, 5, 12, 49));
+  status.tps = Number(jitter(status.tps ?? 20, 0.06, 17.8, 20).toFixed(2));
+  status.tickMs = Math.round(jitter(status.tickMs ?? 25, 5, 12, 49));
   status.network.rxPerSec = Math.round(jitter(status.network.rxPerSec, 20 * 1024, 4 * 1024, 400 * 1024));
   status.network.txPerSec = Math.round(jitter(status.network.txPerSec, 60 * 1024, 20 * 1024, 900 * 1024));
   status.network.rxTotal += status.network.rxPerSec * 2;
@@ -1444,17 +1225,7 @@ function drift(instance: DemoInstance): void {
 function driftWorld(worldId: string): void {
   const entry = worlds.get(worldId);
   if (!entry) return;
-  if (!entry.world.attachedInstanceId) {
-    entry.status.attached = false;
-    entry.status.chunks = 0;
-    entry.status.entities = 0;
-    entry.status.blockEntities = 0;
-    return;
-  }
-  entry.status.attached = true;
-  entry.status.entities = Math.max(0, Math.round(jitter(entry.status.entities, 24, 0, 9000)));
-  entry.status.chunks = Math.max(0, Math.round(jitter(entry.status.chunks, 6, 0, 4000)));
-  entry.status.blockEntities = Math.max(0, Math.round(jitter(entry.status.blockEntities, 4, 0, 2000)));
+  entry.status.attached = entry.world.attachedInstanceId !== null;
 }
 
 const AMBIENT: { level: LogLevel; message: string }[] = [
@@ -1580,6 +1351,8 @@ export function createWorld(request: CreateWorldRequest): World {
     generateStructures: request.generateStructures,
     // A world that has never been mounted has not generated yet.
     generated: false,
+    layout: 'vanilla',
+    dataVersion: null,
     maxWorldSize: request.maxWorldSize,
     allowNether: request.allowNether,
     difficulty: request.difficulty,
@@ -1603,11 +1376,8 @@ export function createWorld(request: CreateWorldRequest): World {
       worldId: id,
       attached: false,
       diskBytes: 0,
-      chunks: 0,
-      entities: 0,
-      blockEntities: 0,
-      day: 0,
-      timeOfDay: '06:00',
+      day: null,
+      timeOfDay: null,
       dimensions: { nether: request.allowNether, end: false },
       playerCount: 0,
       lastPlayedAt: null,
@@ -1641,18 +1411,20 @@ export function createWorld(request: CreateWorldRequest): World {
   return world;
 }
 
-export function updateWorld(id: string, body: Partial<CreateWorldRequest>): World {
+export function updateWorld(id: string, body: UpdateWorldRequest): World {
   const entry = worlds.get(id);
   if (!entry) throw new Error(`no such world: ${id}`);
   const world = entry.world;
   const apply = <K extends keyof World>(key: K, value: World[K] | undefined) => {
     if (value !== undefined) world[key] = value;
   };
-  // Generation keys are locked once the world has generated.
+  // Generation keys are locked once the world has generated (same rule as the backend).
   const generationKey = (key: keyof World, value: unknown) => {
-    if (value !== undefined && !world.generated) {
-      (world[key] as unknown) = value;
+    if (value === undefined || value === world[key]) return;
+    if (world.generated) {
+      throw new Error('Seed, level type and structures are fixed once a world has generated. Create a new world to change them.');
     }
+    (world[key] as unknown) = value;
   };
   generationKey('levelType', body.levelType);
   generationKey('generateStructures', body.generateStructures);
@@ -1663,6 +1435,13 @@ export function updateWorld(id: string, body: Partial<CreateWorldRequest>): Worl
   apply('hardcore', body.hardcore);
   apply('maxWorldSize', body.maxWorldSize);
   apply('allowNether', body.allowNether);
+  apply('spawnProtection', body.spawnProtection);
+  apply('spawnMonsters', body.spawnMonsters);
+  apply('spawnNpcs', body.spawnNpcs);
+  apply('pvp', body.pvp);
+  apply('allowFlight', body.allowFlight);
+  apply('enableCommandBlock', body.enableCommandBlock);
+  apply('dataPacks', body.dataPacks);
   if (body.name !== undefined && body.name.trim()) world.name = body.name.trim();
   world.updatedAt = iso();
 
@@ -1743,10 +1522,7 @@ export function getSoftware(): SoftwareCatalog {
       label: SOFTWARE_LABEL[id],
       blurb: SOFTWARE_BLURB[id],
       kind: id === 'vanilla' ? 'vanilla' : id === 'paper' ? 'plugins' : 'mods',
-      versions: SOFTWARE_VERSIONS[id].map((version) => ({
-        version,
-        image: `sunstead/minecraft:${id}-${version}`,
-      })),
+      versions: SOFTWARE_VERSIONS[id].map((version) => ({ version, javaMajor: javaFor(version), stable: true })),
     })),
   };
 }
@@ -1764,7 +1540,8 @@ export function createProfile(request: CreateProfileRequest): Profile {
     softwareId: request.softwareId,
     software: SOFTWARE_LABEL[request.softwareId],
     version: request.version,
-    image: `sunstead/minecraft:${request.softwareId}-${request.version}`,
+    javaMajor: javaFor(request.version),
+    image: imageFor(request.version),
     memory: request.memory,
     cpuCores: request.cpuCores,
     javaArgs: request.javaArgs,
@@ -1793,7 +1570,7 @@ export function createProfile(request: CreateProfileRequest): Profile {
   return profile;
 }
 
-export function updateProfile(id: string, body: Partial<CreateProfileRequest>): Profile {
+export function updateProfile(id: string, body: UpdateProfileRequest): Profile {
   const entry = profiles.get(id);
   if (!entry) throw new Error(`no such profile: ${id}`);
   const profile = entry.profile;
@@ -1802,12 +1579,12 @@ export function updateProfile(id: string, body: Partial<CreateProfileRequest>): 
   if (body.softwareId !== undefined) {
     profile.softwareId = body.softwareId;
     profile.software = SOFTWARE_LABEL[body.softwareId];
-    profile.image = `sunstead/minecraft:${body.softwareId}-${profile.version}`;
     entry.mods.loader = `${profile.software} ${profile.version}`;
   }
   if (body.version !== undefined) {
     profile.version = body.version;
-    profile.image = `sunstead/minecraft:${profile.softwareId}-${body.version}`;
+    profile.javaMajor = javaFor(body.version);
+    profile.image = imageFor(body.version);
     entry.mods.loader = `${profile.software} ${profile.version}`;
   }
   if (body.memory !== undefined) profile.memory = body.memory;
@@ -1878,6 +1655,13 @@ export function getProfileProperties(id: string): { path: string; updatedAt: str
 export function saveProfileProperties(id: string, changes: Record<string, string>): { path: string; updatedAt: string; fields: PropertyField[] } {
   const entry = profiles.get(id);
   if (!entry) throw new Error(`no such profile: ${id}`);
+  // Same ownership rules as the backend (`properties::validate_profile_changes`).
+  for (const key of Object.keys(changes)) {
+    const def = PROPERTY_DEFS.find((field) => field.key === key);
+    if (!def) throw new Error(`\`${key}\` is not a known server property.`);
+    if (def.scope !== 'profile') throw new Error(`\`${key}\` belongs to the ${def.scope}; edit it there.`);
+    if (def.readOnly) throw new Error(`\`${key}\` is managed by Lodestone and cannot be edited.`);
+  }
   entry.properties = entry.properties.map((field) =>
     field.scope === 'profile' && field.key in changes && !field.readOnly
       ? { ...field, value: changes[field.key] }
@@ -1974,27 +1758,58 @@ export function getInstance(id: string): Instance {
   return entry.instance;
 }
 
+/** Mirrors the backend: creates the world/profile inline when asked, in one step. */
 export function createInstance(request: CreateInstanceRequest): Instance {
-  const profile = profiles.get(request.profileId);
-  const world = worlds.get(request.worldId);
-  if (!profile) throw new Error(`no such profile: ${request.profileId}`);
-  if (!world) throw new Error(`no such world: ${request.worldId}`);
-  if (world.world.attachedInstanceId) {
-    throw new Error(`world "${world.world.name}" is already attached to ${world.world.attachedInstanceId}`);
+  if (!request.name.trim()) throw new Error('Give the instance a name.');
+  if (!!request.worldId === !!request.newWorld) throw new Error('Pick an existing world or describe a new one (not both).');
+  if (!!request.profileId === !!request.newProfile) {
+    throw new Error('Pick an existing configuration or describe a new one (not both).');
   }
+  const existingWorld = request.worldId ? worlds.get(request.worldId) : undefined;
+  if (request.worldId && !existingWorld) throw new Error(`No world with id \`${request.worldId}\`.`);
+  if (existingWorld?.world.attachedInstanceId) {
+    throw new Error(`"${existingWorld.world.name}" is already attached to another instance.`);
+  }
+  const existingProfile = request.profileId ? profiles.get(request.profileId) : undefined;
+  if (request.profileId && !existingProfile) throw new Error(`No profile with id \`${request.profileId}\`.`);
+
+  const used = new Set(
+    [...instances.values()].flatMap(({ instance }) => [instance.ports.minecraft, instance.ports.rcon, instance.ports.query ?? 0]),
+  );
+  const claim = (port: number | undefined, start: number): number => {
+    if (port !== undefined) {
+      if (used.has(port)) throw new Error(`Port ${port} is already used by another instance.`);
+      used.add(port);
+      return port;
+    }
+    let candidate = start;
+    while (used.has(candidate)) candidate += 1;
+    used.add(candidate);
+    return candidate;
+  };
+  const minecraftPort = claim(request.minecraftPort, 25565);
+  const rconPort = claim(request.rconPort, 25575);
+  const queryPort = request.queryPort !== undefined ? claim(request.queryPort, 25565) : null;
+
+  const worldId = existingWorld ? existingWorld.world.id : createWorld(request.newWorld!).id;
+  const profileId = existingProfile ? existingProfile.profile.id : createProfile(request.newProfile!).id;
+  const profile = profiles.get(profileId)!;
+  const world = worlds.get(worldId)!;
 
   const id = uniqueId(request.name, (candidate) => instances.has(candidate));
   const instance: Instance = {
     id,
     name: request.name.trim() || id,
-    profileId: request.profileId,
-    worldId: request.worldId,
+    profileId,
+    worldId,
     state: 'stopped',
     players: { online: 0, max: Number(profile.properties.find((f) => f.key === 'max-players')?.value ?? 20) },
-    address: `play.sunstead.gg:${request.minecraftPort}`,
-    ports: { minecraft: request.minecraftPort, rcon: request.rconPort, query: request.queryPort },
-    environment: { TZ: 'UTC', EULA: 'TRUE' },
+    address: minecraftPort === 25565 ? 'localhost' : `localhost:${minecraftPort}`,
+    ports: { minecraft: minecraftPort, rcon: rconPort, query: queryPort },
+    environment: request.environment ?? { TZ: 'UTC' },
     createdAt: iso(),
+    lastError: null,
+    jobId: null,
     profile: { name: profile.profile.name, software: profile.profile.software, version: profile.profile.version },
     world: { name: world.world.name, folder: world.world.folder },
   };
@@ -2022,32 +1837,26 @@ export function createInstance(request: CreateInstanceRequest): Instance {
   instances.set(id, demoInstance);
   world.world.attachedInstanceId = id;
   world.status.attached = true;
-  profile.profile.instanceCount = countInstancesUsingProfile(request.profileId);
+  profile.profile.instanceCount = countInstancesUsingProfile(profileId);
 
   push(demoInstance, 'INFO', `[Lodestone] Instance "${instance.name}" created from ${profile.profile.name}`, 'lodestone');
   push(demoInstance, 'INFO', `[Lodestone] World "${world.world.name}" attached — nothing is generated until first start`, 'lodestone');
+  if (request.start) postAction(id, 'start');
   return instance;
 }
 
-export function updateInstance(id: string, body: Partial<CreateInstanceRequest>): Instance {
+export function updateInstance(id: string, body: UpdateInstanceRequest): Instance {
   const entry = instances.get(id);
   if (!entry) throw new Error(`no such instance: ${id}`);
   const instance = entry.instance;
   if (body.name !== undefined && body.name.trim()) instance.name = body.name.trim();
   if (body.minecraftPort !== undefined) {
     instance.ports.minecraft = body.minecraftPort;
-    instance.address = `play.sunstead.gg:${body.minecraftPort}`;
+    instance.address = body.minecraftPort === 25565 ? 'localhost' : `localhost:${body.minecraftPort}`;
   }
   if (body.rconPort !== undefined) instance.ports.rcon = body.rconPort;
   if (body.queryPort !== undefined) instance.ports.query = body.queryPort;
-  if (body.profileId !== undefined && body.profileId !== instance.profileId) {
-    const next = profiles.get(body.profileId);
-    if (!next) throw new Error(`no such profile: ${body.profileId}`);
-    instance.profileId = body.profileId;
-    instance.profile = { name: next.profile.name, software: next.profile.software, version: next.profile.version };
-    entry.status.container.image = next.profile.image;
-    entry.status.memory.limitBytes = next.profile.memory.maxMb * 1024 * 1024;
-  }
+  if (body.environment !== undefined) instance.environment = body.environment;
   return instance;
 }
 
@@ -2135,10 +1944,7 @@ export function postAction(id: string, action: ServerAction): Instance {
       entry.status.container.healthy = true;
       if (world) {
         world.world.generated = true;
-        world.status.chunks = 32;
-        world.status.entities = 12;
-        world.status.blockEntities = 0;
-        world.status.day = Math.max(1, world.status.day);
+        world.status.day = Math.max(1, world.status.day ?? 0);
         world.status.timeOfDay = '06:00';
         world.status.lastPlayedAt = iso();
       }
@@ -2250,7 +2056,7 @@ function commandResponse(entry: DemoInstance, command: string): { level: LogLeve
       return [
         {
           level: 'INFO',
-          message: `TPS from last 1m, 5m, 15m: ${entry.status.tps.toFixed(2)}, ${Math.max(19.1, entry.status.tps - 0.2).toFixed(2)}, 19.98`,
+          message: `TPS from last 1m, 5m, 15m: ${(entry.status.tps ?? 20).toFixed(2)}, ${Math.max(19.1, (entry.status.tps ?? 20) - 0.2).toFixed(2)}, 19.98`,
         },
       ];
     case 'seed':
@@ -2387,7 +2193,10 @@ export function getPlayers(id: string): ServerPlayers {
   const entry = instances.get(id);
   if (!entry) throw new Error(`no such instance: ${id}`);
   const bans: BanEntry[] = entry.players.bans;
-  return { ...entry.players, bans };
+  // Like the backend: whitelist flags are the profile's properties.
+  const props = profiles.get(entry.instance.profileId)?.properties ?? [];
+  const flag = (key: string) => props.find((field) => field.key === key)?.value === 'true';
+  return { ...entry.players, bans, whitelistEnabled: flag('white-list'), whitelistEnforced: flag('enforce-whitelist') };
 }
 
 export function postPlayerAction(
@@ -2511,7 +2320,7 @@ export function restoreBackup(worldId: string, backupId: string): void {
   }
 }
 
-export function patchSchedule(worldId: string, patchBody: Partial<BackupIndex['schedule']>): BackupIndex {
+export function patchSchedule(worldId: string, patchBody: UpdateScheduleRequest): BackupIndex {
   const entry = worlds.get(worldId);
   if (!entry) throw new Error(`no such world: ${worldId}`);
   entry.backups.schedule = {
@@ -2540,3 +2349,47 @@ export { drift, driftWorld };
 export { ADVANCEMENTS, DEATHS, AMBIENT_LINES, playerLine, int, pick };
 
 
+
+/* ---------------------------- settings / system ------------------------ */
+
+const settings: AppSettings = {
+  publicAddress: '',
+  eulaAccepted: true,
+  defaultJavaArgs: '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200',
+};
+
+export function getAllBackups(): Backup[] {
+  return [...worlds.values()]
+    .flatMap((entry) => entry.backups.backups)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getSettings(): AppSettings {
+  return { ...settings };
+}
+
+export function updateSettings(body: UpdateSettingsRequest): AppSettings {
+  if (body.publicAddress !== undefined) settings.publicAddress = body.publicAddress.trim();
+  if (body.eulaAccepted !== undefined) settings.eulaAccepted = body.eulaAccepted;
+  if (body.defaultJavaArgs !== undefined) settings.defaultJavaArgs = body.defaultJavaArgs.trim();
+  return getSettings();
+}
+
+export function getSystem(): SystemInfo {
+  const status = [...instances.values()][0]?.status;
+  return {
+    version: 'demo',
+    runtime: { kind: 'demo', available: true, version: null, message: 'In-browser demo data. Nothing runs.' },
+    providers: 'demo',
+    dataDir: '(in memory)',
+    dataDirBytes: 0,
+    host: status?.host ?? {
+      cpuPercent: 0,
+      cpuCores: 8,
+      diskUsedBytes: 0,
+      diskTotalBytes: 0,
+      swapUsedBytes: 0,
+      swapTotalBytes: 0,
+    },
+  };
+}

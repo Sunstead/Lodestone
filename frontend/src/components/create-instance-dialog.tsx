@@ -23,9 +23,6 @@ import {
 import { Button } from '@sunstead/ui/components/button';
 import {
   useCreateInstance,
-  useCreateProfile,
-  useCreateWorld,
-  useInstances,
   useProfiles,
   useSoftware,
   useWorlds,
@@ -75,11 +72,8 @@ export function CreateInstanceDialog({
 }) {
   const worlds = useWorlds();
   const profiles = useProfiles();
-  const instances = useInstances();
   const software = useSoftware();
   const createInstance = useCreateInstance();
-  const createWorld = useCreateWorld();
-  const createProfile = useCreateProfile();
 
   const [name, setName] = useState('');
   const [worldMode, setWorldMode] = useState<Mode>('existing');
@@ -89,15 +83,14 @@ export function CreateInstanceDialog({
     () => (worlds.data ?? []).filter((world) => world.attachedInstanceId === null),
     [worlds.data],
   );
-  const freeProfiles = useMemo(
-    () => (profiles.data ?? []).filter((profile) => profile.instanceCount === 0),
-    [profiles.data],
-  );
+  // Configurations are reusable: any number of instances may share one.
+  const freeProfiles = useMemo(() => profiles.data ?? [], [profiles.data]);
 
   const [worldId, setWorldId] = useState('');
   const [profileId, setProfileId] = useState('');
-  const [minecraftPort, setMinecraftPort] = useState(25565);
-  const [rconPort, setRconPort] = useState(25575);
+  // `null` = let the backend pick a free port.
+  const [minecraftPort, setMinecraftPort] = useState<number | null>(null);
+  const [rconPort, setRconPort] = useState<number | null>(null);
   const [queryPort, setQueryPort] = useState<number | null>(null);
 
   // Inline world draft.
@@ -124,14 +117,14 @@ export function CreateInstanceDialog({
   // Preselect the first free asset of each kind so the happy path is one click.
   useEffect(() => {
     if (!open) return;
+    createInstance.reset();
     setName('');
     setWorldMode(freeWorlds.length > 0 ? 'existing' : 'create');
     setProfileMode(freeProfiles.length > 0 ? 'existing' : 'create');
     setWorldId(freeWorlds[0]?.id ?? '');
     setProfileId(freeProfiles[0]?.id ?? '');
-    const nextPort = 25565 + (instances.data?.length ?? 0) * 2;
-    setMinecraftPort(nextPort);
-    setRconPort(nextPort + 10);
+    setMinecraftPort(null);
+    setRconPort(null);
     setQueryPort(null);
     setWorldDraft((previous) => ({ ...previous, name: '' }));
     setProfileDraft((previous) => ({ ...previous, name: '' }));
@@ -143,42 +136,32 @@ export function CreateInstanceDialog({
   const versions =
     selectedSoftware?.versions.map((entry) => ({ value: entry.version, label: entry.version })) ?? [];
 
-  const busy = createInstance.isPending || createWorld.isPending || createProfile.isPending;
+  const busy = createInstance.isPending;
 
   const canSubmit =
     name.trim().length > 0 &&
     (worldMode === 'existing' ? worldId !== '' : worldDraft.name.trim().length > 0) &&
     (profileMode === 'existing' ? profileId !== '' : profileDraft.name.trim().length > 0);
 
-  const submit = async () => {
-    let finalWorldId = worldId;
-    let finalProfileId = profileId;
-
-    if (worldMode === 'create') {
-      const created = await createWorld.mutateAsync(worldDraft);
-      finalWorldId = created.id;
-    }
-    if (profileMode === 'create') {
-      const body: CreateProfileRequest = {
-        ...profileDraft,
-        description: 'Created while setting up a server',
-        cpuCores: null,
-        javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=200',
-        autoStart: true,
-        restartOnCrash: true,
-        crashThreshold: 3,
-      };
-      const created = await createProfile.mutateAsync(body);
-      finalProfileId = created.id;
-    }
-
+  // One request: the backend creates any new world/profile in the same
+  // transaction, so a failure never leaves half a server behind.
+  const submit = () => {
+    const newProfile: CreateProfileRequest = {
+      ...profileDraft,
+      description: 'Created while setting up a server',
+      cpuCores: null,
+      javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=200',
+      autoStart: false,
+      restartOnCrash: true,
+      crashThreshold: 3,
+    };
     const body: CreateInstanceRequest = {
       name: name.trim(),
-      profileId: finalProfileId,
-      worldId: finalWorldId,
-      minecraftPort,
-      rconPort,
-      queryPort,
+      ...(worldMode === 'existing' ? { worldId } : { newWorld: worldDraft }),
+      ...(profileMode === 'existing' ? { profileId } : { newProfile }),
+      ...(minecraftPort !== null ? { minecraftPort } : {}),
+      ...(rconPort !== null ? { rconPort } : {}),
+      ...(queryPort !== null ? { queryPort } : {}),
     };
 
     createInstance.mutate(body, {
@@ -472,8 +455,9 @@ export function CreateInstanceDialog({
                   <Input
                     id='instance-mc-port'
                     type='number'
-                    value={minecraftPort}
-                    onChange={(event) => setMinecraftPort(Number(event.target.value))}
+                    value={minecraftPort ?? ''}
+                    placeholder='auto'
+                    onChange={(event) => setMinecraftPort(event.target.value === '' ? null : Number(event.target.value))}
                     className='tabular-nums'
                   />
                 </div>
@@ -484,8 +468,9 @@ export function CreateInstanceDialog({
                   <Input
                     id='instance-rcon-port'
                     type='number'
-                    value={rconPort}
-                    onChange={(event) => setRconPort(Number(event.target.value))}
+                    value={rconPort ?? ''}
+                    placeholder='auto'
+                    onChange={(event) => setRconPort(event.target.value === '' ? null : Number(event.target.value))}
                     className='tabular-nums'
                   />
                 </div>
@@ -506,7 +491,8 @@ export function CreateInstanceDialog({
                 </div>
               </div>
               <FieldDescription>
-                Each container needs its own ports. The defaults step past the instances you already have.
+                Leave a port on auto and Lodestone picks one that is free on this host. RCON is only ever
+                published on 127.0.0.1.
               </FieldDescription>
             </Field>
           </FieldGroup>
@@ -519,6 +505,11 @@ export function CreateInstanceDialog({
           ) : null}
         </div>
 
+        {createInstance.error ? (
+          <p role='alert' className='text-sm text-destructive'>
+            {createInstance.error.message}
+          </p>
+        ) : null}
         <DialogFooter>
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             Cancel

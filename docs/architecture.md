@@ -47,8 +47,8 @@ scripts/    dev.mjs, with-backend.mjs
 | `api/` | Axum routes under `/api/v1`. Thin: validation and DTO assembly. |
 | `store` + `migrations/` | SQLite. Assets are JSON documents. Relational rules live in the schema (`UNIQUE(world_id)`, `ON DELETE RESTRICT`). |
 | `supervisor` | Per-instance state machine, console ring buffer, RCON, player tracking, crash policy, metrics sampling, boot-time reconcile. |
-| `runtime/` | `Runtime` trait. `fake` simulates a server in-process and serves real RCON. `docker` (M3) runs containers through bollard. |
-| `software/` | `SoftwareProvider` trait: catalog, Java version, artifact to run. `fake` is offline. Real providers arrive in M2. |
+| `runtime/` | `Runtime` trait. `fake` simulates a server in-process and serves real RCON. `docker` runs containers through bollard. |
+| `software/` | `SoftwareProvider` trait: catalog, Java version, artifact to run. `real` talks to Mojang/PaperMC/Fabric; `fake` is offline. |
 | `cache` | Hash-verified, content-addressed downloads. |
 | `properties` | Shared schema, ownership validation, `server.properties` rendering and parsing. |
 | `backups` | `tar.zst` archives with `save-off`/`save-all flush` around them, atomic restore, scheduler. |
@@ -112,14 +112,17 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 | Frontend unit tests | `frontend/src/**/*.test.ts` | `npm test` |
 | **Contract parity**: the same scenarios against demo and a live backend | `frontend/src/api/contract.test.ts` | `just test-contract` |
 | Browser E2E (demo, full stack on the fake runtime) | `e2e/` | `just e2e` |
-| Real containers | `--features docker-tests` (M3) | `just test-docker` |
+| Real containers: Vanilla, Paper, Fabric, reattach | `backend/crates/lodestone/tests/docker.rs` | `just test-docker` |
+| Live publisher APIs | `#[ignore]` tests in `software/real.rs` | `just test-live` |
+| A joinable server, end to end | `scripts/smoke.mjs` | `just smoke` (`--keep` to play) |
 
 ## Roadmap
 
 - [x] **M0** Monorepo, tooling, shared property schema, CI.
 - [x] **M1** Backend on the fake runtime, end to end: CRUD with one-request (atomic) create, lifecycle, console (SSE), RCON, players, backups, jobs, events, settings/system. Generated contract, contract parity, E2E.
-- [ ] **M2** Real software providers: Mojang, Paper, Fabric, then Forge/NeoForge with an installer job.
-- [ ] **M3** Docker runtime: bollard, image pulls, adopt-on-boot, stats, `just smoke` runs a joinable server.
+- [x] **M2** Real software providers: Mojang (sha1), Paper Fill v3 (sha256), Fabric (launcher pinned on first download). Exact Java from publisher metadata (e.g. 26.x → Java 25). SQLite-cached catalogs with stale fallback when offline.
+- [ ] **M2b** Forge/NeoForge: run the installer once per version in a throwaway container into `cache/installs/`, launch with `@unix_args.txt`.
+- [x] **M3** Docker runtime: bollard, image pulls with progress, `127.0.0.1`-only RCON, runs as the data dir's owner, adopt-on-boot, container stats. `just test-docker` runs Vanilla/Paper/Fabric and a reattach test; `just smoke` brings up a joinable server.
 - [ ] **M4** Worlds: level.dat (DataVersion guard, offline day/time), import/download, layout conversion.
 - [ ] **M5** Modrinth: search, install plan with dependencies, update check, upload, `.mrpack` import. Mods panel rewrite.
 - [ ] **M6** Auth (single admin), onboarding wizard, frontend embedded in the binary, Docker image and compose file.

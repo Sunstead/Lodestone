@@ -314,12 +314,22 @@ async fn prepare(
     world: &World,
 ) -> AppResult<LaunchSpec> {
     let p = &profile.profile;
-    let catalog = app.software.catalog().await?;
-    let java = software::java_major(&catalog, p.software_id, &p.version)?;
-    let image = software::image_for(java);
-
     job.progress(None, format!("Resolving {} {}", p.software, p.version)).await;
-    let Launch::Jar(artifact) = app.software.resolve(p.software_id, &p.version).await?;
+    let Launch::Jar { artifact, java_major } = app.software.resolve(p.software_id, &p.version).await?;
+    let java = match java_major {
+        Some(java) => java,
+        None => software::java_major(&app.software.catalog().await?, p.software_id, &p.version)?,
+    };
+    let image = software::image_for(java);
+    if java != p.java_major {
+        // The publisher knows better than our estimate; remember it.
+        if let Ok(mut record) = app.store.get_profile(&p.id).await {
+            record.profile.java_major = java;
+            record.profile.image = image.clone();
+            let _ = app.store.update_profile(&record).await;
+            app.events.changed(ResourceKind::Profiles, Some(p.id.clone()));
+        }
+    }
     job.progress(Some(0.0), format!("Downloading {}", artifact.filename)).await;
     let jar = app.cache.fetch(&artifact, Some(job)).await?;
 

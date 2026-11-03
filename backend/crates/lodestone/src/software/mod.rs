@@ -3,6 +3,7 @@
 //! every jar comes from its publisher at runtime.
 
 pub mod fake;
+pub mod real;
 
 use async_trait::async_trait;
 
@@ -14,7 +15,11 @@ use crate::model::{ServerSoftwareId, SoftwareCatalog};
 #[derive(Debug, Clone)]
 pub enum Launch {
     /// `java ... -jar server.jar`: vanilla, Paper, Fabric's server launcher.
-    Jar(Artifact),
+    Jar {
+        artifact: Artifact,
+        /// The exact Java the publisher asks for, when it says.
+        java_major: Option<u32>,
+    },
 }
 
 #[async_trait]
@@ -44,9 +49,14 @@ pub fn java_major(catalog: &SoftwareCatalog, software: ServerSoftwareId, version
         .ok_or_else(|| AppError::bad_request(format!("{} does not publish Minecraft {version}.", option.label)))
 }
 
-/// Java Mojang requires for a release, used when a provider does not say.
+/// Java a release needs, used for display when a provider has not said yet.
+/// Resolution reads the exact value from the publisher's metadata.
 pub fn java_for_minecraft(version: &str) -> u32 {
-    let parts: Vec<u32> = version.split('.').filter_map(|part| part.parse().ok()).collect();
+    let parts: Vec<u32> = version.split(['.', '-']).filter_map(|part| part.parse().ok()).collect();
+    // Year-based versions (26.1 onwards) need Java 25.
+    if parts.first().is_some_and(|major| *major >= 26) {
+        return 25;
+    }
     let (minor, patch) = (parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0));
     match (minor, patch) {
         (m, _) if m >= 21 => 21,
@@ -74,5 +84,6 @@ mod tests {
         assert_eq!(java_for_minecraft("1.18.2"), 17);
         assert_eq!(java_for_minecraft("1.17.1"), 16);
         assert_eq!(java_for_minecraft("1.12.2"), 8);
+        assert_eq!(java_for_minecraft("26.3"), 25);
     }
 }

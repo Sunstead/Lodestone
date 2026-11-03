@@ -2,6 +2,7 @@
 //! [`fake::FakeRuntime`] simulates a server in-process for dev and tests,
 //! and the Docker runtime runs real servers in stock JRE containers.
 
+pub mod docker;
 pub mod fake;
 
 use std::net::SocketAddr;

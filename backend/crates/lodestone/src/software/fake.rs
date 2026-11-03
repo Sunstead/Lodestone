@@ -54,6 +54,7 @@ impl SoftwareProvider for FakeSoftware {
         super::java_major(&catalog(), software, version)?;
         let filename = format!("{}-{version}.jar", software.label().to_lowercase());
         let bytes = format!("lodestone fake server: {} {version}\n", software.label()).into_bytes();
-        Ok(Launch::Jar(Artifact { filename, source: Source::Inline(bytes), hash: None, size: None }))
+        let artifact = Artifact { filename, source: Source::Inline(bytes), hash: None, size: None, pin: None };
+        Ok(Launch::Jar { artifact, java_major: None })
     }
 }

@@ -55,9 +55,19 @@ pub struct Artifact {
     /// Human name for progress messages, e.g. `paper-1.21.4-232.jar`.
     pub filename: String,
     pub source: Source,
-    /// Published hash. Required for URLs; computed for inline bytes.
+    /// Published hash. Required for URLs unless `pin` is set.
     pub hash: Option<Hash>,
     pub size: Option<u64>,
+    /// For publishers that do not publish a hash (Fabric's server launcher):
+    /// trust the first HTTPS download, record its sha256 under this key, and
+    /// reuse that exact file from then on.
+    pub pin: Option<String>,
+}
+
+impl Artifact {
+    pub fn url(filename: impl Into<String>, url: impl Into<String>, hash: Hash, size: Option<u64>) -> Self {
+        Self { filename: filename.into(), source: Source::Url(url.into()), hash: Some(hash), size, pin: None }
+    }
 }
 
 #[derive(Clone)]
@@ -75,9 +85,23 @@ impl BlobCache {
         self.root.join(hash.algo.dir()).join(&hash.hex)
     }
 
+    fn pin_path(&self, key: &str) -> PathBuf {
+        let safe: String =
+            key.chars().map(|ch| if ch.is_ascii_alphanumeric() || "._-".contains(ch) { ch } else { '_' }).collect();
+        self.root.join("pins").join(safe)
+    }
+
+    /// The hash recorded for a pinned artifact, if it was downloaded before.
+    fn pinned(&self, artifact: &Artifact) -> Option<Hash> {
+        let key = artifact.pin.as_ref()?;
+        let hex = std::fs::read_to_string(self.pin_path(key)).ok()?;
+        Some(Hash { algo: HashAlgo::Sha256, hex: hex.trim().to_owned() })
+    }
+
     /// Returns the cached path, downloading and verifying when missing.
     pub async fn fetch(&self, artifact: &Artifact, job: Option<&JobHandle>) -> AppResult<PathBuf> {
-        if let Some(hash) = &artifact.hash {
+        let pinned = self.pinned(artifact);
+        if let Some(hash) = artifact.hash.as_ref().or(pinned.as_ref()) {
             let path = self.path_for(hash);
             if path.is_file() {
                 return Ok(path);
@@ -104,12 +128,18 @@ impl BlobCache {
         };
         let path = self.path_for(&hash);
         write_atomic(&path, &bytes).await?;
+        if let (None, Some(key)) = (&artifact.hash, &artifact.pin) {
+            write_atomic(&self.pin_path(key), hash.hex.as_bytes()).await?;
+        }
         Ok(path)
     }
 
     async fn download(&self, url: &str, artifact: &Artifact, job: Option<&JobHandle>) -> AppResult<Vec<u8>> {
-        if artifact.hash.is_none() {
+        if artifact.hash.is_none() && artifact.pin.is_none() {
             return Err(AppError::Internal(anyhow::anyhow!("refusing to download {url} without a published hash")));
+        }
+        if !url.starts_with("https://") && !cfg!(test) && !url.starts_with("http://127.0.0.1") {
+            return Err(AppError::Internal(anyhow::anyhow!("refusing to download {url} over plain HTTP")));
         }
         let client = self
             .http
@@ -155,8 +185,13 @@ mod tests {
     async fn caches_inline_bytes_by_hash() {
         let dir = tempfile::tempdir().unwrap();
         let cache = BlobCache::new(dir.path().to_path_buf(), None);
-        let artifact =
-            Artifact { filename: "a.jar".into(), source: Source::Inline(b"jar".to_vec()), hash: None, size: None };
+        let artifact = Artifact {
+            filename: "a.jar".into(),
+            source: Source::Inline(b"jar".to_vec()),
+            hash: None,
+            size: None,
+            pin: None,
+        };
         let path = cache.fetch(&artifact, None).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"jar");
         assert!(path.ends_with(HashAlgo::Sha256.digest(b"jar")));
@@ -171,6 +206,7 @@ mod tests {
             source: Source::Inline(b"tampered".to_vec()),
             hash: Some(Hash { algo: HashAlgo::Sha1, hex: HashAlgo::Sha1.digest(b"original") }),
             size: None,
+            pin: None,
         };
         let err = cache.fetch(&artifact, None).await.unwrap_err();
         assert!(err.to_string().contains("failed verification"));
@@ -185,7 +221,48 @@ mod tests {
             source: Source::Url("https://example.invalid/x.jar".into()),
             hash: None,
             size: None,
+            pin: None,
         };
         assert!(cache.fetch(&artifact, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn downloads_verify_and_pin() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/server.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"real jar".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/launcher.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"launcher".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlobCache::new(dir.path().to_path_buf(), Some(reqwest::Client::new()));
+        let hashed = Artifact::url(
+            "server.jar",
+            format!("{}/server.jar", server.uri()),
+            Hash { algo: HashAlgo::Sha1, hex: HashAlgo::Sha1.digest(b"real jar") },
+            None,
+        );
+        let first = cache.fetch(&hashed, None).await.unwrap();
+        // Second fetch is served from the cache (the mock expects one hit).
+        assert_eq!(cache.fetch(&hashed, None).await.unwrap(), first);
+
+        let pinned = Artifact {
+            filename: "launcher.jar".into(),
+            source: Source::Url(format!("{}/launcher.jar", server.uri())),
+            hash: None,
+            size: None,
+            pin: Some("fabric:1.21.4".into()),
+        };
+        let path = cache.fetch(&pinned, None).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"launcher");
+        assert_eq!(cache.fetch(&pinned, None).await.unwrap(), path);
     }
 }

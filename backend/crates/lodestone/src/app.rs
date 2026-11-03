@@ -12,9 +12,11 @@ use crate::events::EventBus;
 use crate::host::HostSampler;
 use crate::jobs::Jobs;
 use crate::paths::Paths;
+use crate::runtime::docker::DockerRuntime;
 use crate::runtime::fake::FakeRuntime;
 use crate::runtime::Runtime;
 use crate::software::fake::FakeSoftware;
+use crate::software::real::{Endpoints, RealSoftware};
 use crate::software::SoftwareProvider;
 use crate::store::Store;
 use crate::supervisor::{self, InstanceManager};
@@ -63,13 +65,15 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     };
     let software: Arc<dyn SoftwareProvider> = match config.providers {
         ProviderKind::Fake => Arc::new(FakeSoftware),
-        ProviderKind::Real => {
-            anyhow::bail!("real software providers are not implemented yet; run with --providers fake")
-        }
+        ProviderKind::Real => Arc::new(RealSoftware::new(
+            http.clone().expect("real providers have an HTTP client"),
+            store.clone(),
+            Endpoints::default(),
+        )),
     };
     let runtime: Arc<dyn Runtime> = match config.runtime {
         RuntimeKind::Fake => Arc::new(FakeRuntime::new(config.fake_speed, config.fake_speed > 0.0)),
-        RuntimeKind::Docker => anyhow::bail!("the Docker runtime is not implemented yet; run with --runtime fake"),
+        RuntimeKind::Docker => Arc::new(DockerRuntime::connect(&config.data_dir, config.host_data_dir.clone())),
     };
 
     Ok(Arc::new(Services {

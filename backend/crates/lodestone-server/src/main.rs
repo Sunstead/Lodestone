@@ -94,6 +94,10 @@ struct Args {
     #[arg(long, env = "LODESTONE_PUBLIC_URL")]
     public_url: Option<String>,
 
+    /// CurseForge API key (console.curseforge.com). Admins can also set it in Settings.
+    #[arg(long, env = "LODESTONE_CURSEFORGE_API_KEY", hide_env_values = true)]
+    curseforge_api_key: Option<String>,
+
     /// No sign-in: every request is this user, an admin. Development only.
     #[arg(long, env = "LODESTONE_DEV_USER", conflicts_with = "oidc_issuer")]
     dev_user: Option<String>,
@@ -148,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
     lodestone::run(Config {
         auth,
         public_url,
+        curseforge_api_key: args.curseforge_api_key,
         data_dir,
         bind: args.bind,
         runtime: match args.runtime {

@@ -7,6 +7,10 @@ import type { ContentSource } from "./ContentSource";
  */
 export type ContentProviderInfo = { id: ContentSource, label: string, 
 /**
+ * What it offers, e.g. `Mods and plugins` or `Paper plugins`.
+ */
+description: string, 
+/**
  * False when it can't serve this profile (e.g. Hangar has no mods) or
  * needs setup (CurseForge without an API key); `reason` says why.
  */

@@ -1,5 +1,5 @@
 {
-  "$comment": "Offline mod/plugin catalog for the fake content provider (backend --providers fake) and the demo. Names mirror real projects so the UI reads naturally, but there are no real files: each 'jar' is a few placeholder bytes. Versions are newest first.",
+  "$comment": "Offline mod/plugin catalog for the fake content providers (backend --providers fake: Modrinth, Hangar and CurseForge stand-ins) and the demo. Projects with restrictedOn must be downloaded by hand on those providers, like CurseForge files with distribution disabled. Names mirror real projects so the UI reads naturally, but there are no real files: each 'jar' is a few placeholder bytes. Versions are newest first.",
   "projects": [
     {
       "id": "fk-worldedit", "slug": "worldedit", "name": "WorldEdit", "author": "EngineHub",
@@ -36,7 +36,7 @@
       ]
     },
     {
-      "id": "fk-essentialsx", "slug": "essentialsx", "name": "EssentialsX", "author": "EssentialsX Team",
+      "id": "fk-essentialsx", "slug": "essentialsx", "name": "EssentialsX", "author": "EssentialsX Team", "restrictedOn": ["curseforge"],
       "description": "Homes, warps, kits, teleports and the hundred other commands every server wants.",
       "categories": ["utility", "management"], "downloads": 4980000,
       "versions": [
@@ -114,7 +114,7 @@
       ]
     },
     {
-      "id": "fk-ferritecore", "slug": "ferrite-core", "name": "FerriteCore", "author": "malte0811",
+      "id": "fk-ferritecore", "slug": "ferrite-core", "name": "FerriteCore", "author": "malte0811", "restrictedOn": ["curseforge"],
       "description": "Cuts memory use, so more of the heap goes to the world.",
       "categories": ["optimization"], "downloads": 38200000,
       "versions": [

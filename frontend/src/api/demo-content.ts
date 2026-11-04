@@ -44,6 +44,7 @@ type FakeProject = {
   description: string;
   categories: string[];
   downloads: number;
+  restrictedOn?: string[];
   versions: FakeVersion[];
 };
 
@@ -77,25 +78,71 @@ function targetOf(profile: Profile): Target {
   };
 }
 
+type Source = Exclude<ContentSource, 'upload'>;
+const SOURCES: { id: Source; label: string; description: string }[] = [
+  { id: 'modrinth', label: 'Modrinth', description: 'Mods and plugins' },
+  { id: 'hangar', label: 'Hangar', description: 'Paper plugins' },
+  { id: 'curseforge', label: 'CurseForge', description: 'Mods and Bukkit plugins' },
+];
+const label = (source: ContentSource): string => SOURCES.find((s) => s.id === source)?.label ?? source;
+
+/** Mirrors the backend: CurseForge needs a key, which the demo's Settings can "set". */
+let curseforgeKey = false;
+export function setCurseforgeKey(set: boolean): void {
+  curseforgeKey = set;
+}
+
+function unavailable(source: ContentSource, target: Target): string | null {
+  if (source === 'hangar' && target.kind !== 'plugin') return 'Hangar only has Paper plugins.';
+  if (source === 'curseforge' && !curseforgeKey) return 'CurseForge needs an API key. An admin can add one in Settings.';
+  return null;
+}
+
+function usable(source: ContentSource, target: Target): Source {
+  if (!SOURCES.some((s) => s.id === source)) throw new Error(`${source} isn't set up on this Lodestone.`);
+  const reason = unavailable(source, target);
+  if (reason) throw new Error(reason);
+  return source as Source;
+}
+
+function pageFor(source: ContentSource, project: FakeProject): string {
+  if (source === 'hangar') return `https://hangar.papermc.io/${project.author.replace(/ /g, '')}/${project.slug}`;
+  if (source === 'curseforge') return `https://www.curseforge.com/minecraft/mc-mods/${project.slug}`;
+  return `https://modrinth.com/project/${project.slug}`;
+}
+
+/** The placeholder "jar" for a version, as the backend's fake provider makes it. */
+export const jarText = (versionId: string): string => `lodestone fake content: ${versionId}\n`;
+
+/**
+ * Where to fetch a file Lodestone may not download. The demo hands over the
+ * placeholder jar itself, so the manual-download flow can be tried end to end.
+ */
+const manualUrl = (versionId: string): string =>
+  `data:application/java-archive;base64,${typeof btoa === 'function' ? btoa(jarText(versionId)) : Buffer.from(jarText(versionId)).toString('base64')}`;
+
 const accepts = (target: Target, loaders: string[], gameVersions: string[]): boolean =>
   loaders.some((loader) => target.loaders.includes(loader)) && gameVersions.includes(target.gameVersion);
 
 const describe = (target: Target): string =>
   `${{ vanilla: 'Vanilla', paper: 'Paper', fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge' }[target.software]} ${target.gameVersion}`;
 
-function findProject(id: string): FakeProject {
+function findProject(id: string, source: ContentSource = 'modrinth'): FakeProject {
   const project = PROJECTS.find((p) => p.id === id || p.slug === id);
-  if (!project) throw new Error('Modrinth has no such project or version.');
+  if (!project) throw new Error(`${label(source)} has no such project or version.`);
   return project;
 }
 
-function toVersion(project: FakeProject, version: FakeVersion, target: Target): ContentVersion {
+const restricted = (project: FakeProject, source: ContentSource): boolean =>
+  (project.restrictedOn ?? []).includes(source);
+
+function toVersion(project: FakeProject, version: FakeVersion, target: Target, source: Source = 'modrinth'): ContentVersion {
   // Plausible jar sizes (60 KB to 6 MB), stable per version.
   let hash = 0;
   for (const ch of version.id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   const bytes = 60_000 + (hash % 6_000_000);
   return {
-    provider: 'modrinth',
+    provider: source,
     id: version.id,
     projectId: project.id,
     name: `${project.name} ${version.versionNumber}`,
@@ -112,16 +159,20 @@ function toVersion(project: FakeProject, version: FakeVersion, target: Target): 
   };
 }
 
-function findVersion(versionId: string, target: Target): { project: FakeProject; version: ContentVersion } {
+function findVersion(
+  versionId: string,
+  target: Target,
+  source: Source = 'modrinth',
+): { project: FakeProject; version: ContentVersion } {
   for (const project of PROJECTS) {
     const version = project.versions.find((v) => v.id === versionId);
-    if (version) return { project, version: toVersion(project, version, target) };
+    if (version) return { project, version: toVersion(project, version, target, source) };
   }
-  throw new Error('Modrinth has no such project or version.');
+  throw new Error(`${label(source)} has no such project or version.`);
 }
 
-const compatibleVersions = (project: FakeProject, target: Target): ContentVersion[] =>
-  project.versions.map((v) => toVersion(project, v, target)).filter((v) => v.compatible);
+const compatibleVersions = (project: FakeProject, target: Target, source: Source = 'modrinth'): ContentVersion[] =>
+  project.versions.map((v) => toVersion(project, v, target, source)).filter((v) => v.compatible);
 
 const pick = (versions: ContentVersion[]): ContentVersion | undefined =>
   versions.find((v) => v.channel === 'release') ?? versions[0];
@@ -134,6 +185,8 @@ type Lock = {
   deps: Map<string, ContentDependency[]>;
   /** Loader/versions each entry was built for, for `compatible`. */
   builtFor: Map<string, { loaders: string[]; gameVersions: string[] }>;
+  /** Entries waiting for a manual download: entry id -> the file's text. */
+  waiting: Map<string, string>;
   checkedAt: string | null;
 };
 
@@ -143,7 +196,7 @@ let counter = 0;
 function lock(profileId: string): Lock {
   let found = locks.get(profileId);
   if (!found) {
-    found = { entries: [], deps: new Map(), builtFor: new Map(), checkedAt: null };
+    found = { entries: [], deps: new Map(), builtFor: new Map(), waiting: new Map(), checkedAt: null };
     locks.set(profileId, found);
   }
   return found;
@@ -162,6 +215,8 @@ export function copyContent(from: string, to: string): void {
     copy.deps.set(id, source.deps.get(entry.id) ?? []);
     const built = source.builtFor.get(entry.id);
     if (built) copy.builtFor.set(id, built);
+    const waiting = source.waiting.get(entry.id);
+    if (waiting) copy.waiting.set(id, waiting);
   }
 }
 
@@ -183,6 +238,7 @@ export function index(profile: Profile): ContentIndex {
         !!target &&
         entry.kind === target.kind &&
         (entry.provider === 'upload' || (!!built && accepts(target, built.loaders, built.gameVersions))),
+      manualDownload: l.waiting.has(entry.id) && entry.versionId ? manualUrl(entry.versionId) : null,
     };
   });
   return {
@@ -191,17 +247,27 @@ export function index(profile: Profile): ContentIndex {
     gameVersion: profile.version,
     entries,
     checkedAt: l.checkedAt,
-    providers: target ? [{ id: 'modrinth', label: 'Modrinth', available: true, reason: null }] : [],
+    providers: target
+      ? SOURCES.map((source) => {
+          const reason = unavailable(source.id, target);
+          return { ...source, available: !reason, reason };
+        })
+      : [],
   };
 }
 
 export function search(
   profile: Profile,
-  params: { q: string; sort?: string; offset?: number; limit?: number },
+  params: { q: string; provider?: ContentSource; sort?: string; offset?: number; limit?: number },
 ): ContentSearchResult {
   const target = targetOf(profile);
+  const source = usable(params.provider ?? 'modrinth', target);
   const needle = params.q.trim().toLowerCase();
-  const installed = new Set(lock(profile.id).entries.map((e) => e.projectId));
+  const installed = new Set(
+    lock(profile.id)
+      .entries.filter((e) => e.provider === source)
+      .map((e) => e.projectId),
+  );
   let hits = PROJECTS.filter((p) => p.versions.some((v) => accepts(target, v.loaders, v.gameVersions))).filter(
     (p) =>
       !needle ||
@@ -218,14 +284,14 @@ export function search(
   return {
     hits: hits.slice(offset, offset + limit).map(
       (p): ContentProject => ({
-        provider: 'modrinth',
+        provider: source,
         id: p.id,
         slug: p.slug,
         name: p.name,
         author: p.author,
         description: p.description,
         iconUrl: null,
-        pageUrl: `https://modrinth.com/project/${p.slug}`,
+        pageUrl: pageFor(source, p),
         downloads: p.downloads,
         categories: p.categories,
         kind: target.kind,
@@ -239,8 +305,9 @@ export function search(
 }
 
 export function versions(profile: Profile, provider: ContentSource, projectId: string): ContentVersion[] {
-  if (provider !== 'modrinth') throw new Error(`${provider} isn't set up on this Lodestone.`);
-  return compatibleVersions(findProject(projectId), targetOf(profile));
+  const target = targetOf(profile);
+  const source = usable(provider, target);
+  return compatibleVersions(findProject(projectId, source), target, source);
 }
 
 export function plan(profile: Profile, requests: ContentRef[]): InstallPlan {
@@ -251,20 +318,23 @@ export function plan(profile: Profile, requests: ContentRef[]): InstallPlan {
   const seen = new Set<string>();
   const queue: { ref: ContentRef; requiredBy: string | null }[] = requests.map((ref) => ({ ref, requiredBy: null }));
   const optional: { projectId: string; by: string }[] = [];
-  const installedProject = (id: string) => installed.entries.find((e) => e.projectId === id);
+  const optionalSources = new Map<string, Source>();
 
   while (queue.length) {
     const { ref, requiredBy } = queue.shift()!;
-    if (seen.has(ref.projectId)) continue;
-    seen.add(ref.projectId);
+    const source = usable(ref.provider, target);
+    const installedProject = (id: string) =>
+      installed.entries.find((e) => e.provider === source && e.projectId === id);
+    if (seen.has(`${source}:${ref.projectId}`)) continue;
+    seen.add(`${source}:${ref.projectId}`);
     const existing = installedProject(ref.projectId);
     if (requiredBy && existing) continue;
-    const project = findProject(ref.projectId);
+    const project = findProject(ref.projectId, source);
     let chosen: ContentVersion | undefined;
     if (ref.versionId) {
-      const { version } = findVersion(ref.versionId, target);
+      const { version } = findVersion(ref.versionId, target, source);
       if (version.compatible) chosen = version;
-      else if (requiredBy) chosen = pick(compatibleVersions(project, target));
+      else if (requiredBy) chosen = pick(compatibleVersions(project, target, source));
       else {
         out.conflicts.push({
           name: project.name,
@@ -273,7 +343,7 @@ export function plan(profile: Profile, requests: ContentRef[]): InstallPlan {
         continue;
       }
     } else {
-      chosen = pick(compatibleVersions(project, target));
+      chosen = pick(compatibleVersions(project, target, source));
     }
     if (!chosen) {
       out.conflicts.push({
@@ -297,9 +367,10 @@ export function plan(profile: Profile, requests: ContentRef[]): InstallPlan {
     for (const dep of chosen.dependencies) {
       if (!dep.projectId) continue;
       if (dep.kind === 'required') {
-        queue.push({ ref: { provider: 'modrinth', projectId: dep.projectId, versionId: dep.versionId ?? undefined }, requiredBy: project.name });
+        queue.push({ ref: { provider: source, projectId: dep.projectId, versionId: dep.versionId ?? undefined }, requiredBy: project.name });
       } else if (dep.kind === 'optional' && !installedProject(dep.projectId)) {
         optional.push({ projectId: dep.projectId, by: project.name });
+        optionalSources.set(dep.projectId, source);
       } else if (dep.kind === 'incompatible') {
         const clash = installedProject(dep.projectId);
         const other =
@@ -312,7 +383,7 @@ export function plan(profile: Profile, requests: ContentRef[]): InstallPlan {
       }
     }
     const item: PlanItem = {
-      provider: 'modrinth',
+      provider: source,
       projectId: project.id,
       versionId: chosen.id,
       name: project.name,
@@ -322,14 +393,16 @@ export function plan(profile: Profile, requests: ContentRef[]): InstallPlan {
       iconUrl: null,
       requiredBy,
       replaces: existing ? { entryId: existing.id, versionName: existing.versionName } : null,
+      manualDownload: restricted(project, source) ? manualUrl(chosen.id) : null,
     };
     out.install.push(item);
   }
   for (const { projectId, by } of optional) {
     if (out.install.some((i) => i.projectId === projectId) || out.optional.some((o) => o.projectId === projectId)) continue;
-    const project = findProject(projectId);
-    if (compatibleVersions(project, target).length === 0) continue;
-    const suggestion: PlanSuggestion = { provider: 'modrinth', projectId, name: project.name, suggestedBy: by };
+    const source = optionalSources.get(projectId) ?? 'modrinth';
+    const project = findProject(projectId, source);
+    if (compatibleVersions(project, target, source).length === 0) continue;
+    const suggestion: PlanSuggestion = { provider: source, projectId, name: project.name, suggestedBy: by };
     out.optional.push(suggestion);
   }
   return out;
@@ -341,22 +414,23 @@ export function apply(profile: Profile, items: ContentRef[]): ContentIndex {
   const l = lock(profile.id);
   const resolved = items.map((item) => {
     if (!item.versionId) throw new Error('Pick a version for each item to install.');
-    const { project, version } = findVersion(item.versionId, target);
+    const source = usable(item.provider, target);
+    const { project, version } = findVersion(item.versionId, target, source);
     if (project.id !== item.projectId) throw new Error(`Version ${item.versionId} doesn't belong to that project.`);
     if (!version.compatible) throw new Error(`${version.name} isn't built for ${describe(target)}.`);
-    return { project, version };
+    return { project, version, source };
   });
   const now = new Date().toISOString();
-  for (const { project, version } of resolved) {
+  for (const { project, version, source } of resolved) {
     const needed =
       resolved.some(({ version: other }) =>
         other.dependencies.some((d) => d.kind === 'required' && d.projectId === project.id),
       ) || l.entries.some((e) => requires(l, e, project.id));
-    const previous = l.entries.find((e) => e.projectId === project.id);
+    const previous = l.entries.find((e) => e.provider === source && e.projectId === project.id);
     const id = previous?.id ?? `content-demo-${++counter}`;
     const entry: ContentEntry = {
       id,
-      provider: 'modrinth',
+      provider: source,
       projectId: project.id,
       versionId: version.id,
       name: project.name,
@@ -367,14 +441,17 @@ export function apply(profile: Profile, items: ContentRef[]): ContentIndex {
       author: project.author,
       description: project.description,
       iconUrl: null,
-      pageUrl: `https://modrinth.com/project/${project.slug}`,
+      pageUrl: pageFor(source, project),
       enabled: previous?.enabled ?? true,
       dependency: previous?.dependency ?? needed,
       requiredBy: [],
       compatible: true,
       update: null,
+      manualDownload: null,
       installedAt: previous?.installedAt ?? now,
     };
+    if (restricted(project, source)) l.waiting.set(id, jarText(version.id));
+    else l.waiting.delete(id);
     if (previous) l.entries[l.entries.indexOf(previous)] = entry;
     else l.entries.push(entry);
     l.deps.set(id, version.dependencies);
@@ -405,8 +482,9 @@ export function checkUpdates(profile: Profile): ContentIndex {
   const target = targetOf(profile);
   const l = lock(profile.id);
   for (const entry of l.entries) {
-    if (entry.provider !== 'modrinth' || !entry.projectId) continue;
-    const latest = pick(compatibleVersions(findProject(entry.projectId), target));
+    if (entry.provider === 'upload' || !entry.projectId || unavailable(entry.provider, target)) continue;
+    const source = entry.provider as Source;
+    const latest = pick(compatibleVersions(findProject(entry.projectId, source), target, source));
     entry.update =
       latest && latest.id !== entry.versionId ? { versionId: latest.id, versionName: latest.versionNumber } : null;
   }
@@ -417,7 +495,7 @@ export function checkUpdates(profile: Profile): ContentIndex {
 export function update(profile: Profile, entryId: string): ContentIndex {
   const entry = entryOf(profile, entryId);
   if (!entry.update || !entry.projectId) throw new Error(`${entry.name} is up to date.`);
-  const result = plan(profile, [{ provider: 'modrinth', projectId: entry.projectId, versionId: entry.update.versionId }]);
+  const result = plan(profile, [{ provider: entry.provider, projectId: entry.projectId, versionId: entry.update.versionId }]);
   if (result.conflicts.length) throw new Error(result.conflicts[0].message);
   return apply(
     profile,
@@ -425,10 +503,30 @@ export function update(profile: Profile, entryId: string): ContentIndex {
   );
 }
 
-export function upload(profile: Profile, filename: string, size: number): ContentIndex {
+/** A file for an entry that has to be downloaded by hand. */
+export function provideFile(profile: Profile, entryId: string, filename: string, text: string): ContentIndex {
+  const entry = entryOf(profile, entryId);
+  const l = lock(profile.id);
+  const expected = l.waiting.get(entryId);
+  if (expected !== undefined && expected !== text) {
+    throw new Error(
+      `${filename} isn't ${entry.filename}: its checksum doesn't match. Download exactly that file from its download page.`,
+    );
+  }
+  l.waiting.delete(entryId);
+  return index(profile);
+}
+
+/** `text` is the file's contents, to match a waiting manual download. */
+export function upload(profile: Profile, filename: string, size: number, text?: string): ContentIndex {
   const target = targetOf(profile);
   if (!filename.toLowerCase().endsWith('.jar')) throw new Error('Upload a .jar file.');
   const l = lock(profile.id);
+  const waiting = [...l.waiting.entries()].find(([, expected]) => expected === text);
+  if (waiting) {
+    l.waiting.delete(waiting[0]);
+    return index(profile);
+  }
   if (l.entries.some((e) => e.filename === filename)) {
     throw new Error(`This configuration already has a file named ${filename}.`);
   }
@@ -451,6 +549,7 @@ export function upload(profile: Profile, filename: string, size: number): Conten
     requiredBy: [],
     compatible: true,
     update: null,
+    manualDownload: null,
     installedAt: new Date().toISOString(),
   });
   return index(profile);

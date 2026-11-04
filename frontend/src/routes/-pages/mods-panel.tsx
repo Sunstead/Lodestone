@@ -32,6 +32,7 @@ import {
   useApplyContent,
   useCheckContentUpdates,
   useContent,
+  useProvideContentFile,
   useContentSearch,
   useContentVersions,
   usePlanContent,
@@ -40,12 +41,13 @@ import {
   useUpdateContent,
   useUploadContent,
 } from '#/api/queries';
-import type { ContentEntry, ContentProject, ContentRef, InstallPlan } from '#/api/types';
+import type { ContentEntry, ContentProject, ContentProviderInfo, ContentRef, ContentSource, InstallPlan } from '#/api/types';
 import { EmptyState, StatStrip } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
 import { formatBytes, formatNumber, formatRelative } from '#/lib/format';
 import {
   ArrowUpCircle,
+  Download,
   ExternalLink,
   Link2,
   Loader2,
@@ -144,6 +146,7 @@ function InstalledRow({
   onToggle,
   onUpdate,
   onRemove,
+  onProvideFile,
 }: {
   entry: ContentEntry;
   target: string;
@@ -151,9 +154,12 @@ function InstalledRow({
   onToggle: (enabled: boolean) => void;
   onUpdate: () => void;
   onRemove: () => void;
+  onProvideFile: (file: File) => void;
 }) {
+  const fileInput = useRef<HTMLInputElement>(null);
   return (
-    <div className={cn('flex flex-col gap-3 p-4 sm:flex-row sm:items-center', !entry.enabled && 'opacity-60')}>
+    <div className={cn('flex flex-col gap-3 p-4', !entry.enabled && 'opacity-60')}>
+    <div className='flex flex-col gap-3 sm:flex-row sm:items-center'>
       <div className='flex min-w-0 flex-1 items-start gap-3'>
         <ProjectIcon url={entry.iconUrl} name={entry.name} />
         <div className='min-w-0 flex-1'>
@@ -217,6 +223,42 @@ function InstalledRow({
           <TooltipContent>{entry.enabled ? 'Enabled: loaded on start' : 'Disabled: left out on start'}</TooltipContent>
         </Tooltip>
       </div>
+    </div>
+      {entry.manualDownload ? (
+        <div className='flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm sm:flex-row sm:items-center'>
+          <p className='min-w-0 flex-1'>
+            <span className='font-medium'>Download this file yourself.</span>{' '}
+            <span className='text-muted-foreground'>
+              {SOURCE_LABEL[entry.provider]}'s author doesn't allow other apps to download it. Get{' '}
+              <code className='text-xs'>{entry.filename}</code>, then upload it here; Lodestone checks it's the right file.
+              Servers using this configuration won't start until then.
+            </span>
+          </p>
+          <div className='flex shrink-0 gap-2'>
+            <Button
+              variant='outline'
+              size='sm'
+              render={<a href={entry.manualDownload} target='_blank' rel='noreferrer' download={entry.filename} />}
+            >
+              <Download /> Download
+            </Button>
+            <Button variant='outline' size='sm' disabled={pending} onClick={() => fileInput.current?.click()}>
+              <Upload /> Upload file
+            </Button>
+            <input
+              ref={fileInput}
+              type='file'
+              accept='.jar'
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) onProvideFile(file);
+                event.target.value = '';
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -335,6 +377,42 @@ function VersionPicker({
   );
 }
 
+/** Where to browse: each source, with why it's unavailable when it is. */
+function SourcePicker({
+  sources,
+  value,
+  onChange,
+}: {
+  sources: ContentProviderInfo[];
+  value: ContentSource;
+  onChange: (source: ContentSource) => void;
+}) {
+  return (
+    <div role='radiogroup' aria-label='Source' className='flex flex-wrap gap-1 rounded-md border p-1'>
+      {sources.map((source) => (
+        <Tooltip key={source.id}>
+          <TooltipTrigger render={<span className='inline-flex flex-1' />}>
+            <Button
+              role='radio'
+              aria-checked={value === source.id}
+              variant={value === source.id ? 'secondary' : 'ghost'}
+              size='sm'
+              className={cn('h-auto w-full flex-col items-start gap-0 px-3 py-1.5 text-left', !source.available && 'opacity-60')}
+              onClick={() => onChange(source.id)}
+            >
+              <span className='font-medium'>{source.label}</span>
+              <span className='text-xs font-normal text-muted-foreground'>
+                {source.available ? source.description : 'Unavailable'}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{source.reason ?? source.description}</TooltipContent>
+        </Tooltip>
+      ))}
+    </div>
+  );
+}
+
 /* ---------------------------- install plan ---------------------------- */
 
 /**
@@ -367,7 +445,8 @@ function PlanDialog({
 
   useEffect(() => {
     if (!request) return;
-    const items: ContentRef[] = [...request, ...extras.map((projectId) => ({ provider: 'modrinth' as const, projectId }))];
+    const source = request[0]?.provider ?? 'modrinth';
+    const items: ContentRef[] = [...request, ...extras.map((projectId) => ({ provider: source, projectId }))];
     planner.mutate(items, { onSuccess: setPlan });
   }, [requestKey, extras.join(',')]);
 
@@ -382,8 +461,8 @@ function PlanDialog({
         <DialogHeader>
           <DialogTitle>{plan?.install.some((item) => item.replaces) && plan.install.length === 1 ? `Update ${title}` : `Install ${title}`}</DialogTitle>
           <DialogDescription>
-            Files are checked against Modrinth's published hashes. Servers using this configuration pick them up on their next
-            start.
+            Files are checked against the hashes their source publishes. Servers using this configuration pick them up on
+            their next start.
           </DialogDescription>
         </DialogHeader>
 
@@ -414,10 +493,24 @@ function PlanDialog({
                       {formatBytes(item.sizeBytes, 1)}
                     </p>
                   </div>
-                  {item.requiredBy ? <Badge variant='secondary'>Dependency</Badge> : null}
+                  {item.manualDownload ? (
+                    <Badge variant='outline' className='border-amber-500/40 text-amber-500'>
+                      Manual download
+                    </Badge>
+                  ) : item.requiredBy ? (
+                    <Badge variant='secondary'>Dependency</Badge>
+                  ) : null}
                 </li>
               ))}
             </ul>
+          ) : null}
+
+          {plan?.install.some((item) => item.manualDownload) ? (
+            <p className='text-sm text-muted-foreground'>
+              Files marked <span className='font-medium text-foreground'>Manual download</span> can't be fetched by Lodestone:
+              their authors only allow downloads from the source's website. After installing, download each one and upload it
+              in the list.
+            </p>
           ) : null}
 
           {plan && plan.install.length === 0 && plan.conflicts.length === 0 ? (
@@ -497,7 +590,9 @@ export function ModsPanel({ profileId }: { profileId: string }) {
   const update = useUpdateContent(profileId);
   const check = useCheckContentUpdates(profileId);
   const upload = useUploadContent(profileId);
+  const provideFile = useProvideContentFile(profileId);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [source, setSource] = useState<ContentSource>('modrinth');
 
   const [tab, setTab] = useState('installed');
   const [filter, setFilter] = useState('');
@@ -513,11 +608,21 @@ export function ModsPanel({ profileId }: { profileId: string }) {
   const noun = isPlugins ? 'plugins' : 'mods';
   const target = index ? `${LOADER_LABEL[index.loaders[0]] ?? index.loaders[0] ?? ''} ${index.gameVersion}` : '';
   const updates = entries.filter((entry) => entry.update);
-  const pending = toggle.isPending || remove.isPending || update.isPending || upload.isPending;
-  const mutationError = toggle.error ?? remove.error ?? update.error ?? upload.error ?? check.error;
+  const pending = toggle.isPending || remove.isPending || update.isPending || upload.isPending || provideFile.isPending;
+  const mutationError =
+    toggle.error ?? remove.error ?? update.error ?? upload.error ?? check.error ?? provideFile.error;
+  const waitingForFiles = entries.filter((entry) => entry.manualDownload);
+  const sources = index?.providers ?? [];
+  const sourceInfo = sources.find((p) => p.id === source);
+  const sourceLabel = sourceInfo?.label ?? 'Modrinth';
 
   const debounced = useDebounced(search.trim(), 300);
-  const results = useContentSearch(tab === 'browse' && index?.kind !== 'vanilla' ? profileId : '', debounced, sort);
+  const results = useContentSearch(
+    tab === 'browse' && index?.kind !== 'vanilla' && sourceInfo?.available ? profileId : '',
+    debounced,
+    sort,
+    source,
+  );
   const hits = results.data?.pages.flatMap((page) => page.hits) ?? [];
   const total = results.data?.pages[0]?.total ?? 0;
 
@@ -569,7 +674,7 @@ export function ModsPanel({ profileId }: { profileId: string }) {
           <div className='flex flex-wrap items-center gap-2'>
             <TabsList>
               <TabsTrigger value='installed'>Installed ({entries.length})</TabsTrigger>
-              <TabsTrigger value='browse'>Browse Modrinth</TabsTrigger>
+              <TabsTrigger value='browse'>Browse</TabsTrigger>
             </TabsList>
             <div className='ml-auto flex flex-wrap items-center gap-2'>
               {tab === 'installed' ? (
@@ -609,6 +714,12 @@ export function ModsPanel({ profileId }: { profileId: string }) {
           </div>
 
           {mutationError ? <p className='mt-3 text-sm text-destructive'>{mutationError.message}</p> : null}
+          {waitingForFiles.length > 0 && tab === 'installed' ? (
+            <p className='mt-3 text-sm text-amber-500'>
+              {waitingForFiles.map((e) => e.name).join(', ')} {waitingForFiles.length === 1 ? 'needs' : 'need'} downloading by
+              hand before servers using this configuration can start.
+            </p>
+          ) : null}
 
           <TabsContent value='installed' className='mt-3 space-y-3'>
             {entries.length > 0 ? (
@@ -631,13 +742,13 @@ export function ModsPanel({ profileId }: { profileId: string }) {
                     title={entries.length === 0 ? `No ${noun} yet` : 'No matches'}
                     description={
                       entries.length === 0
-                        ? `Browse Modrinth for ${noun} built for ${target}, or upload a .jar.`
+                        ? `Browse Modrinth${isPlugins ? ', Hangar' : ''} or CurseForge for ${noun} built for ${target}, or upload a .jar.`
                         : 'Try a different filter.'
                     }
                   >
                     {entries.length === 0 ? (
                       <Button variant='outline' size='sm' onClick={() => setTab('browse')}>
-                        <Search /> Browse Modrinth
+                        <Search /> Browse
                       </Button>
                     ) : null}
                   </EmptyState>
@@ -657,6 +768,7 @@ export function ModsPanel({ profileId }: { profileId: string }) {
                         setPlanFor([{ provider: entry.provider, projectId: entry.projectId, versionId: entry.update.versionId }])
                       }
                       onRemove={() => (entry.requiredBy.length ? setRemoving(entry) : remove.mutate(entry.id))}
+                      onProvideFile={(file) => provideFile.mutate({ entry: entry.id, file })}
                     />
                   ))}
                 </div>
@@ -669,15 +781,24 @@ export function ModsPanel({ profileId }: { profileId: string }) {
           </TabsContent>
 
           <TabsContent value='browse' className='mt-3 space-y-3'>
+            <SourcePicker sources={sources} value={source} onChange={setSource} />
+            {sourceInfo && !sourceInfo.available ? (
+              <Card>
+                <CardContent className='p-6'>
+                  <EmptyState icon={PackageOpen} title={`${sourceInfo.label} isn't available here`} description={sourceInfo.reason ?? undefined} />
+                </CardContent>
+              </Card>
+            ) : (
+            <>
             <div className='flex flex-wrap items-center gap-2'>
               <div className='relative min-w-48 flex-1'>
                 <Search aria-hidden='true' className='pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground' />
                 <Input
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder={`Search Modrinth ${noun} for ${target}…`}
+                  placeholder={`Search ${sourceLabel} ${noun} for ${target}…`}
                   className='pl-8'
-                  aria-label={`Search Modrinth ${noun}`}
+                  aria-label={`Search ${sourceLabel} ${noun}`}
                 />
               </div>
               <Select items={SORTS} value={sort} onValueChange={(value) => value && setSort(value as Sort)}>
@@ -702,7 +823,7 @@ export function ModsPanel({ profileId }: { profileId: string }) {
                 </div>
               ) : results.error ? (
                 <CardContent className='p-6'>
-                  <EmptyState icon={TriangleAlert} title="Couldn't search Modrinth" description={results.error.message} />
+                  <EmptyState icon={TriangleAlert} title={`Couldn't search ${sourceLabel}`} description={results.error.message} />
                 </CardContent>
               ) : hits.length === 0 ? (
                 <CardContent className='p-6'>
@@ -737,6 +858,8 @@ export function ModsPanel({ profileId }: { profileId: string }) {
                 </Button>
               ) : null}
             </div>
+            </>
+            )}
           </TabsContent>
         </Tabs>
 

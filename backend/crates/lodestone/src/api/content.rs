@@ -167,6 +167,18 @@ pub async fn upload(
     Ok(Json(install::upload(&app, &id, &name, bytes).await?))
 }
 
+/// The file for an entry that has to be downloaded by hand.
+pub async fn provide_file(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path((id, entry)): Path<(String, String)>,
+    multipart: Multipart,
+) -> AppResult<Json<ContentIndex>> {
+    user.check(&app.store, Asset::Profile, &id).await?;
+    let (name, bytes) = file_field(multipart).await?;
+    Ok(Json(install::provide_file(&app, &id, &entry, &name, bytes).await?))
+}
+
 /// Imports a `.mrpack` as a new profile. The job's `targetId` is the profile.
 pub async fn import_modpack(
     State(app): State<AppState>,

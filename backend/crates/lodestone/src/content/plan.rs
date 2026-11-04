@@ -173,6 +173,7 @@ pub async fn plan(
                 entry_id: record.id.clone(),
                 version_name: record.version_name.clone(),
             }),
+            manual_download: chosen.file.manual_url.clone().filter(|_| chosen.file.is_manual()),
         });
     }
 

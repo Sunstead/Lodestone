@@ -4,4 +4,8 @@ export type AppSettings = {
 /**
  * Host players type to connect, e.g. `play.example.com`. Blank = `localhost`.
  */
-publicAddress: string, defaultJavaArgs: string, };
+publicAddress: string, defaultJavaArgs: string, 
+/**
+ * A CurseForge API key is set. The key itself is never sent back.
+ */
+curseforgeKeySet: boolean, };

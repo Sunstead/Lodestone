@@ -67,6 +67,10 @@ pub fn router(state: AppState) -> Router {
         .route("/profiles/{id}/content/projects/{provider}/{project}/versions", get(content::versions))
         .route("/profiles/{id}/content/{entry}", patch(content::patch).delete(content::remove))
         .route("/profiles/{id}/content/{entry}/update", post(content::update))
+        .route(
+            "/profiles/{id}/content/{entry}/file",
+            post(content::provide_file).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
+        )
         // instances
         .route("/instances", get(instances::list).post(instances::create))
         .route("/instances/{id}", get(instances::get).patch(instances::update).delete(instances::delete))

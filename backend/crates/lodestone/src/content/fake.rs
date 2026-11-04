@@ -1,16 +1,21 @@
-//! Offline content provider for `--providers fake` and the tests. The
-//! catalog is `shared/fake-content.json`, which the frontend demo uses too,
-//! and every "jar" is a few placeholder bytes.
+//! Offline content providers for `--providers fake` and the tests: Modrinth,
+//! Hangar and CurseForge stand-ins over one catalog,
+//! `shared/fake-content.json`, which the frontend demo uses too. Every
+//! "jar" is a few placeholder bytes, hashed the way each real provider
+//! publishes (sha512, sha256, sha1). Projects marked `restrictedOn` a
+//! provider must be downloaded by hand there, like CurseForge's
+//! "distribution disabled" files.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use super::curseforge::ApiKey;
 use super::{project_hit, ContentProvider, FileRef, ProjectInfo, ResolvedVersion, SearchQuery, SearchSort, Target};
 use crate::cache::HashAlgo;
 use crate::error::{AppError, AppResult};
-use crate::model::{ContentDependency, ContentSearchResult, ContentSource, ContentVersion, VersionChannel};
+use crate::model::{ContentDependency, ContentSearchResult, ContentSource, ContentVersion, ModKind, VersionChannel};
 
 const CATALOG: &str = include_str!("../../../../../shared/fake-content.json");
 
@@ -29,6 +34,8 @@ struct Project {
     description: String,
     categories: Vec<String>,
     downloads: u64,
+    #[serde(default)]
+    restricted_on: Vec<ContentSource>,
     versions: Vec<Version>,
 }
 
@@ -45,13 +52,15 @@ struct Version {
 }
 
 pub struct FakeContent {
+    source: ContentSource,
     projects: Vec<Project>,
+    /// CurseForge's stand-in wants a key, like the real one.
+    key: Option<ApiKey>,
 }
 
 impl Default for FakeContent {
     fn default() -> Self {
-        let catalog: Catalog = serde_json::from_str(CATALOG).expect("shared/fake-content.json is valid");
-        Self { projects: catalog.projects }
+        Self::new(ContentSource::Modrinth, None)
     }
 }
 
@@ -60,32 +69,62 @@ pub fn jar_bytes(version_id: &str) -> Vec<u8> {
     format!("lodestone fake content: {version_id}\n").into_bytes()
 }
 
-impl Project {
-    fn info(&self) -> ProjectInfo {
-        ProjectInfo {
-            id: self.id.clone(),
-            slug: self.slug.clone(),
-            name: self.name.clone(),
-            author: self.author.clone(),
-            description: self.description.clone(),
-            icon_url: None,
-            page_url: format!("https://modrinth.com/project/{}", self.slug),
+impl FakeContent {
+    pub fn new(source: ContentSource, key: Option<ApiKey>) -> Self {
+        let catalog: Catalog = serde_json::from_str(CATALOG).expect("shared/fake-content.json is valid");
+        Self { source, projects: catalog.projects, key }
+    }
+
+    fn page(&self, project: &Project) -> String {
+        match self.source {
+            ContentSource::Hangar => {
+                format!("https://hangar.papermc.io/{}/{}", project.author.replace(' ', ""), project.slug)
+            }
+            ContentSource::Curseforge => format!("https://www.curseforge.com/minecraft/mc-mods/{}", project.slug),
+            _ => format!("https://modrinth.com/project/{}", project.slug),
         }
     }
 
-    fn resolve(&self, version: &Version, target: &Target) -> ResolvedVersion {
+    fn info(&self, project: &Project) -> ProjectInfo {
+        ProjectInfo {
+            id: project.id.clone(),
+            slug: project.slug.clone(),
+            name: project.name.clone(),
+            author: project.author.clone(),
+            description: project.description.clone(),
+            icon_url: None,
+            page_url: self.page(project),
+        }
+    }
+
+    fn resolve(&self, project: &Project, version: &Version, target: &Target) -> ResolvedVersion {
         let bytes = jar_bytes(&version.id);
-        let filename = format!("{}-{}.jar", self.slug, version.version_number.replace('+', "-"));
+        let filename = format!("{}-{}.jar", project.slug, version.version_number.replace('+', "-"));
+        let restricted = project.restricted_on.contains(&self.source);
+        let mut file = FileRef::default();
+        match self.source {
+            ContentSource::Hangar => file.sha256 = Some(HashAlgo::Sha256.digest(&bytes)),
+            ContentSource::Curseforge => file.sha1 = Some(HashAlgo::Sha1.digest(&bytes)),
+            _ => {
+                file.sha512 = Some(HashAlgo::Sha512.digest(&bytes));
+                file.sha1 = Some(HashAlgo::Sha1.digest(&bytes));
+            }
+        }
+        if restricted {
+            file.manual_url = Some(format!("{}/files/{}", self.page(project), version.id));
+        } else {
+            file.inline = Some(bytes.clone());
+        }
         ResolvedVersion {
             version: ContentVersion {
-                provider: ContentSource::Modrinth,
+                provider: self.source,
                 id: version.id.clone(),
-                project_id: self.id.clone(),
-                name: format!("{} {}", self.name, version.version_number),
+                project_id: project.id.clone(),
+                name: format!("{} {}", project.name, version.version_number),
                 version_number: version.version_number.clone(),
                 channel: version.channel,
                 published_at: version.published_at.clone(),
-                downloads: self.downloads / 10,
+                downloads: project.downloads / 10,
                 game_versions: version.game_versions.clone(),
                 loaders: version.loaders.clone(),
                 filename,
@@ -93,41 +132,49 @@ impl Project {
                 dependencies: version.dependencies.clone(),
                 compatible: target.accepts(&version.loaders, &version.game_versions),
             },
-            file: FileRef {
-                url: None,
-                sha512: HashAlgo::Sha512.digest(&bytes),
-                sha1: Some(HashAlgo::Sha1.digest(&bytes)),
-                inline: Some(bytes),
-            },
+            file,
         }
     }
 
-    fn fits(&self, target: &Target) -> bool {
-        self.versions.iter().any(|v| target.accepts(&v.loaders, &v.game_versions))
+    fn fits(project: &Project, target: &Target) -> bool {
+        project.versions.iter().any(|v| target.accepts(&v.loaders, &v.game_versions))
     }
-}
 
-impl FakeContent {
     fn find(&self, id: &str) -> AppResult<&Project> {
         self.projects
             .iter()
             .find(|project| project.id == id || project.slug == id)
-            .ok_or_else(|| AppError::NotFound("Modrinth has no such project or version.".into()))
+            .ok_or_else(|| AppError::NotFound(format!("{} has no such project or version.", self.source.label())))
     }
 
-    fn all_versions(&self, target: &Target) -> impl Iterator<Item = ResolvedVersion> + '_ {
-        let target = target.clone();
-        self.projects.iter().flat_map(move |project| {
-            let target = target.clone();
-            project.versions.iter().map(move |version| project.resolve(version, &target))
-        })
+    fn all_versions<'a>(&'a self, target: &'a Target) -> impl Iterator<Item = ResolvedVersion> + 'a {
+        self.projects
+            .iter()
+            .flat_map(move |project| project.versions.iter().map(move |version| self.resolve(project, version, target)))
     }
 }
 
 #[async_trait]
 impl ContentProvider for FakeContent {
     fn id(&self) -> ContentSource {
-        ContentSource::Modrinth
+        self.source
+    }
+
+    fn description(&self) -> &'static str {
+        match self.source {
+            ContentSource::Hangar => "Paper plugins",
+            _ => "Mods and plugins",
+        }
+    }
+
+    fn unavailable(&self, target: &Target) -> Option<String> {
+        if self.source == ContentSource::Hangar && target.kind != ModKind::Plugin {
+            return Some("Hangar only has Paper plugins.".into());
+        }
+        if self.key.as_ref().is_some_and(|key| key.get().is_none()) {
+            return Some("CurseForge needs an API key. An admin can add one in Settings.".into());
+        }
+        None
     }
 
     async fn search(&self, target: &Target, query: &SearchQuery) -> AppResult<ContentSearchResult> {
@@ -135,7 +182,7 @@ impl ContentProvider for FakeContent {
         let mut hits: Vec<&Project> = self
             .projects
             .iter()
-            .filter(|project| project.fits(target))
+            .filter(|project| Self::fits(project, target))
             .filter(|project| {
                 needle.is_empty()
                     || project.name.to_lowercase().contains(&needle)
@@ -157,8 +204,8 @@ impl ContentProvider for FakeContent {
                 .take(query.limit as usize)
                 .map(|project| {
                     project_hit(
-                        ContentSource::Modrinth,
-                        project.info(),
+                        self.source,
+                        self.info(project),
                         project.downloads,
                         project.categories.clone(),
                         target.kind,
@@ -172,7 +219,7 @@ impl ContentProvider for FakeContent {
     }
 
     async fn project(&self, id: &str) -> AppResult<ProjectInfo> {
-        Ok(self.find(id)?.info())
+        Ok(self.info(self.find(id)?))
     }
 
     async fn versions(&self, project_id: &str, target: &Target) -> AppResult<Vec<ResolvedVersion>> {
@@ -180,7 +227,7 @@ impl ContentProvider for FakeContent {
         Ok(project
             .versions
             .iter()
-            .map(|version| project.resolve(version, target))
+            .map(|version| self.resolve(project, version, target))
             .filter(|resolved| resolved.version.compatible)
             .collect())
     }
@@ -188,37 +235,19 @@ impl ContentProvider for FakeContent {
     async fn version(&self, version_id: &str, target: &Target) -> AppResult<ResolvedVersion> {
         self.all_versions(target)
             .find(|resolved| resolved.version.id == version_id)
-            .ok_or_else(|| AppError::NotFound("Modrinth has no such project or version.".into()))
-    }
-
-    async fn latest_for_hashes(
-        &self,
-        sha512: &[String],
-        target: &Target,
-    ) -> AppResult<HashMap<String, ResolvedVersion>> {
-        let mut out = HashMap::new();
-        for hash in sha512 {
-            let Some(current) = self.all_versions(target).find(|resolved| &resolved.file.sha512 == hash) else {
-                continue;
-            };
-            let project = self.find(&current.version.project_id)?;
-            let latest = project
-                .versions
-                .iter()
-                .map(|version| project.resolve(version, target))
-                .find(|resolved| resolved.version.compatible);
-            if let Some(latest) = latest {
-                out.insert(hash.clone(), latest);
-            }
-        }
-        Ok(out)
+            .ok_or_else(|| AppError::NotFound(format!("{} has no such project or version.", self.source.label())))
     }
 
     async fn identify(&self, sha512: &[String], target: &Target) -> AppResult<HashMap<String, ResolvedVersion>> {
+        if self.source != ContentSource::Modrinth {
+            return Ok(HashMap::new());
+        }
         Ok(self
             .all_versions(target)
-            .filter(|resolved| sha512.contains(&resolved.file.sha512))
-            .map(|resolved| (resolved.file.sha512.clone(), resolved))
+            .filter_map(|resolved| {
+                let hash = resolved.file.sha512.clone()?;
+                sha512.contains(&hash).then_some((hash, resolved))
+            })
             .collect())
     }
 }

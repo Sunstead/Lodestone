@@ -53,6 +53,8 @@ pub struct Config {
     pub public_url: Option<url::Url>,
     pub data_dir: PathBuf,
     pub bind: SocketAddr,
+    /// CurseForge API key from the environment; Settings can set one too.
+    pub curseforge_api_key: Option<String>,
     pub runtime: RuntimeKind,
     pub providers: ProviderKind,
     /// Serve a built frontend from this directory at `/`.
@@ -76,6 +78,7 @@ impl Config {
             public_url: None,
             data_dir: data_dir.into(),
             bind: "127.0.0.1:0".parse().expect("valid addr"),
+            curseforge_api_key: None,
             runtime: RuntimeKind::Fake,
             providers: ProviderKind::Fake,
             static_dir: None,

@@ -239,9 +239,9 @@ async fn fill(app: &AppState, profile_id: &str, pack: Pack, job: &crate::jobs::J
             Some((_, version)) => version.file.clone(),
             None => FileRef {
                 url: Some(file.url.clone()),
-                sha512: file.sha512.clone(),
+                sha512: Some(file.sha512.clone()),
                 sha1: file.sha1.clone(),
-                inline: None,
+                ..Default::default()
             },
         };
         let blob = app.cache.fetch(&file_ref.artifact(&filename, file.size)?, None).await?;
@@ -289,7 +289,7 @@ async fn fill(app: &AppState, profile_id: &str, pack: Pack, job: &crate::jobs::J
                 )
                 .await?;
             let record =
-                upload_record(&name, FileRef { url: None, sha512, sha1: None, inline: None }, size, target.kind);
+                upload_record(&name, FileRef { sha512: Some(sha512), ..Default::default() }, size, target.kind);
             app.store.put_content(profile_id, &record).await?;
             mods += 1;
             continue;

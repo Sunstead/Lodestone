@@ -25,7 +25,7 @@ import type { ApiMode } from '#/api/types';
 import { formatBytes } from '#/lib/format';
 import { KeyValue, SectionHeading } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
-import { Globe, LogOut, Palette, RefreshCw, Scale, Server, ShieldCheck, UserRound, Users } from 'lucide-react';
+import { Globe, KeyRound, LogOut, Palette, RefreshCw, Scale, Server, ShieldCheck, UserRound, Users } from 'lucide-react';
 import { formatRelative } from '#/lib/format';
 import { useEffect, useState } from 'react';
 
@@ -45,6 +45,7 @@ export function AppSettingsPage() {
   const admin = me.data?.user.admin ?? false;
   const users = useUsers(admin);
   const [address, setAddress] = useState('');
+  const [curseforgeKey, setCurseforgeKey] = useState('');
 
   useEffect(() => {
     const unsubscribe = onModeChange((next) => {
@@ -284,6 +285,62 @@ export function AppSettingsPage() {
           ) : null}
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className='flex items-center gap-2'>
+            <KeyRound className='size-4' /> CurseForge
+          </CardTitle>
+          <CardDescription>
+            Searching CurseForge needs an API key, free from{' '}
+            <a className='underline' href='https://console.curseforge.com/' target='_blank' rel='noreferrer'>
+              console.curseforge.com
+            </a>
+            . Modrinth and Hangar need nothing.{admin ? '' : ' Only admins can set it.'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className='space-y-2'>
+          <p className='text-sm'>
+            {settings.data?.curseforgeKeySet ? (
+              <Badge variant='secondary'>Key set</Badge>
+            ) : (
+              <Badge variant='outline'>No key: CurseForge is unavailable</Badge>
+            )}
+          </p>
+          {admin ? (
+            <form
+              className='flex flex-wrap gap-2'
+              onSubmit={(event) => {
+                event.preventDefault();
+                updateSettings.mutate({ curseforgeApiKey: curseforgeKey }, { onSuccess: () => setCurseforgeKey('') });
+              }}
+            >
+              <Input
+                aria-label='CurseForge API key'
+                type='password'
+                autoComplete='off'
+                placeholder={settings.data?.curseforgeKeySet ? 'Paste a new key to replace it' : 'Paste your API key'}
+                value={curseforgeKey}
+                className='min-w-48 flex-1'
+                onChange={(event) => setCurseforgeKey(event.target.value)}
+              />
+              <Button type='submit' variant='outline' disabled={!curseforgeKey.trim() || updateSettings.isPending}>
+                Save key
+              </Button>
+              {settings.data?.curseforgeKeySet ? (
+                <Button
+                  type='button'
+                  variant='ghost'
+                  disabled={updateSettings.isPending}
+                  onClick={() => updateSettings.mutate({ curseforgeApiKey: '' })}
+                >
+                  Remove
+                </Button>
+              ) : null}
+            </form>
+          ) : null}
+        </CardContent>
+      </Card>
 
       {admin ? (
         <Card>

@@ -1,14 +1,20 @@
 //! Mods and plugins. A profile's content is a lockfile (`profile_content`)
-//! of exact provider versions pinned by sha512; the jars live in the blob
+//! of exact provider versions pinned by hash; the jars live in the blob
 //! cache and are linked into the profile's `plugins/` or `mods/` folder when
 //! a server prepares.
 //!
-//! Providers (`ContentProvider`) answer search, versions and update checks.
-//! Modrinth is the first; Hangar and CurseForge slot in beside it. Install
+//! Providers (`ContentProvider`) answer search, versions and update checks:
+//! Modrinth (sha512), Hangar (Paper plugins, sha256) and CurseForge (needs
+//! an API key, sha1). Files a publisher won't let third parties download
+//! (CurseForge's "distribution disabled", Hangar's external links) are
+//! recorded with a `manual_url`: the user downloads them and uploads them,
+//! and Lodestone checks the hash, as Prism does. Install
 //! plans (`plan`) resolve dependencies the way Prism does: required ones are
 //! added, optional ones are offered, incompatible ones block.
 
+pub mod curseforge;
 pub mod fake;
+pub mod hangar;
 pub mod install;
 pub mod jarmeta;
 pub mod modrinth;
@@ -124,23 +130,82 @@ pub struct ResolvedVersion {
     pub file: FileRef,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct FileRef {
     pub url: Option<String>,
-    pub sha512: String,
+    #[serde(default)]
+    pub sha512: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
     pub sha1: Option<String>,
+    /// The page to download it from by hand, when the publisher doesn't
+    /// allow third-party downloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_url: Option<String>,
     /// Only for the fake provider: the bytes themselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline: Option<Vec<u8>>,
 }
 
 impl FileRef {
+    /// The strongest hash the publisher gave, which keys the blob cache.
+    pub fn hash(&self) -> Option<Hash> {
+        let (algo, hex) = match (&self.sha512, &self.sha256, &self.sha1) {
+            (Some(hex), _, _) => (HashAlgo::Sha512, hex),
+            (None, Some(hex), _) => (HashAlgo::Sha256, hex),
+            (None, None, Some(hex)) => (HashAlgo::Sha1, hex),
+            (None, None, None) => return None,
+        };
+        Some(Hash { algo, hex: hex.to_ascii_lowercase() })
+    }
+
+    /// Whether `bytes` are this file, by every hash it has.
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        let checks = [(HashAlgo::Sha512, &self.sha512), (HashAlgo::Sha256, &self.sha256), (HashAlgo::Sha1, &self.sha1)];
+        let mut any = false;
+        for (algo, expected) in checks {
+            if let Some(expected) = expected {
+                any = true;
+                if !algo.digest(bytes).eq_ignore_ascii_case(expected) {
+                    return false;
+                }
+            }
+        }
+        any
+    }
+
+    /// Hashes for bytes Lodestone has in hand (uploads).
+    pub fn of(bytes: &[u8]) -> Self {
+        Self {
+            sha512: Some(HashAlgo::Sha512.digest(bytes)),
+            sha256: Some(HashAlgo::Sha256.digest(bytes)),
+            sha1: Some(HashAlgo::Sha1.digest(bytes)),
+            ..Default::default()
+        }
+    }
+
+    /// Only a person can fetch it, from `manual_url`.
+    pub fn is_manual(&self) -> bool {
+        self.url.is_none() && self.inline.is_none() && self.manual_url.is_some()
+    }
+
     pub fn artifact(&self, filename: &str, size: u64) -> AppResult<Artifact> {
-        let hash = Hash { algo: HashAlgo::Sha512, hex: self.sha512.clone() };
-        let source = match (&self.inline, &self.url) {
-            (Some(bytes), _) => Source::Inline(bytes.clone()),
-            (None, Some(url)) => Source::Url(url.clone()),
-            (None, None) => {
+        let hash = self.hash().ok_or_else(|| {
+            AppError::bad_request(format!("{filename} has no published hash, so it can't be verified."))
+        })?;
+        let source = match (&self.inline, &self.url, &self.manual_url) {
+            (Some(bytes), _, _) => Source::Inline(bytes.clone()),
+            (None, Some(url), _) => Source::Url(url.clone()),
+            (None, None, Some(page)) => {
+                return Err(AppError::Conflict {
+                    code: "content_missing",
+                    message: format!(
+                        "{filename} has to be downloaded by hand: get it from {page}, then upload it in Mods & Plugins."
+                    ),
+                })
+            }
+            (None, None, None) => {
                 return Err(AppError::Conflict {
                     code: "content_missing",
                     message: format!("{filename} was uploaded and is no longer in the cache. Upload it again."),
@@ -154,6 +219,11 @@ impl FileRef {
 #[async_trait]
 pub trait ContentProvider: Send + Sync {
     fn id(&self) -> ContentSource;
+
+    /// What it offers, for the source picker.
+    fn description(&self) -> &'static str {
+        "Mods and plugins"
+    }
 
     /// Why this provider can't serve `target`, if it can't.
     fn unavailable(&self, _target: &Target) -> Option<String> {
@@ -170,20 +240,32 @@ pub trait ContentProvider: Send + Sync {
 
     async fn version(&self, version_id: &str, target: &Target) -> AppResult<ResolvedVersion>;
 
-    /// The newest version for `target` of each file, by sha512. Files the
-    /// provider doesn't know are left out.
-    async fn latest_for_hashes(
-        &self,
-        _sha512: &[String],
-        _target: &Target,
-    ) -> AppResult<HashMap<String, ResolvedVersion>> {
-        Ok(HashMap::new())
+    /// The newest version for `target` of each installed entry, keyed by
+    /// entry id. Entries already at their newest may be left out.
+    async fn latest(&self, records: &[ContentRecord], target: &Target) -> AppResult<HashMap<String, ResolvedVersion>> {
+        latest_by_versions(self, records, target).await
     }
 
     /// Which published version each file is, by sha512 (uploads, modpacks).
     async fn identify(&self, _sha512: &[String], _target: &Target) -> AppResult<HashMap<String, ResolvedVersion>> {
         Ok(HashMap::new())
     }
+}
+
+/// Update check one project at a time: the newest version that fits.
+pub async fn latest_by_versions<P: ContentProvider + ?Sized>(
+    provider: &P,
+    records: &[ContentRecord],
+    target: &Target,
+) -> AppResult<HashMap<String, ResolvedVersion>> {
+    let mut out = HashMap::new();
+    for record in records {
+        let Some(project) = &record.project_id else { continue };
+        if let Some(latest) = plan::pick(provider.versions(project, target).await?) {
+            out.insert(record.id.clone(), latest);
+        }
+    }
+    Ok(out)
 }
 
 /// Every configured provider.
@@ -221,6 +303,7 @@ impl Providers {
                 ContentProviderInfo {
                     id: provider.id(),
                     label: provider.id().label().into(),
+                    description: provider.description().into(),
                     available: reason.is_none(),
                     reason,
                 }
@@ -313,7 +396,12 @@ impl ContentRecord {
 }
 
 /// Lockfile rows as the UI sees them, with who-needs-what filled in.
-pub fn entries(records: &[ContentRecord], target: Option<&Target>) -> Vec<ContentEntry> {
+/// `cached` says whether a file is in the blob cache.
+pub fn entries(
+    records: &[ContentRecord],
+    target: Option<&Target>,
+    cached: impl Fn(&FileRef) -> bool,
+) -> Vec<ContentEntry> {
     records
         .iter()
         .map(|record| {
@@ -344,6 +432,7 @@ pub fn entries(records: &[ContentRecord], target: Option<&Target>) -> Vec<Conten
                 required_by,
                 compatible: target.is_some_and(|target| record.compatible(target)),
                 update: record.update.clone(),
+                manual_download: record.file.manual_url.clone().filter(|_| !cached(&record.file)),
                 installed_at: record.installed_at.clone(),
             }
         })
@@ -387,8 +476,52 @@ pub fn safe_filename(raw: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A lockfile row to build test cases from.
+    pub fn record() -> ContentRecord {
+        ContentRecord {
+            id: "entry".into(),
+            provider: ContentSource::Modrinth,
+            project_id: Some("project".into()),
+            version_id: Some("version".into()),
+            slug: None,
+            name: "Thing".into(),
+            version_name: "1.0".into(),
+            filename: "thing-1.0.jar".into(),
+            size_bytes: 1,
+            kind: ModKind::Plugin,
+            author: String::new(),
+            description: String::new(),
+            icon_url: None,
+            page_url: None,
+            file: FileRef::default(),
+            enabled: true,
+            dependency: false,
+            dependencies: vec![],
+            game_versions: vec![],
+            loaders: vec![],
+            update: None,
+            installed_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn files_verify_by_every_hash_they_have() {
+        let bytes = b"jar";
+        let file = FileRef::of(bytes);
+        assert!(file.matches(bytes));
+        assert!(!file.matches(b"other"));
+        assert_eq!(file.hash().unwrap().algo, HashAlgo::Sha512);
+        let sha1_only = FileRef { sha1: Some(HashAlgo::Sha1.digest(bytes).to_uppercase()), ..Default::default() };
+        assert!(sha1_only.matches(bytes), "case doesn't matter");
+        assert!(!FileRef::default().matches(bytes), "nothing to check against is no match");
+        let manual = FileRef { manual_url: Some("https://x".into()), ..sha1_only };
+        assert!(manual.is_manual());
+        let err = manual.artifact("a.jar", 1).unwrap_err();
+        assert!(err.to_string().contains("downloaded by hand"), "{err}");
+    }
 
     #[test]
     fn filenames_stay_inside_the_folder() {

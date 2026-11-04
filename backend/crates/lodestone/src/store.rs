@@ -467,6 +467,7 @@ impl Store {
             None => Ok(AppSettings {
                 public_address: String::new(),
                 default_java_args: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200".into(),
+                curseforge_key_set: false,
             }),
         }
     }

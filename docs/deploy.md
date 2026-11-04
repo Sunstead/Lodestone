@@ -88,6 +88,7 @@ lodestone.example.com {
 | `LODESTONE_OIDC_ALLOWED_GROUPS` | — | Comma-separated; empty lets in anyone Authentik does. |
 | `LODESTONE_OIDC_DISCOVERY_URL` | issuer + `.well-known/...` | When Lodestone must reach Authentik at another address. |
 | `LODESTONE_HOST_DATA_DIR` | — | The data dir's host path, when it differs. |
+| `LODESTONE_CURSEFORGE_API_KEY` | — | Enables CurseForge as a source. Admins can also set it in Settings. Modrinth and Hangar need no key. |
 | `LODESTONE_DEV_USER` | — | No sign-in; everyone is this admin. Development only. |
 
 The API also accepts an Authentik access token for the same client as

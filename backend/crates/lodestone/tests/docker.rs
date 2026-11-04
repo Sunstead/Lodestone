@@ -140,12 +140,18 @@ impl Lodestone {
 }
 
 async fn run_server(software: &str, version: &str, nether_folder: &str) {
-    run_server_with(software, version, nether_folder, None).await;
+    run_server_with(software, software, version, nether_folder, None).await;
 }
 
-/// `plugin`: a Modrinth project slug to install first, and the name it logs.
-async fn run_server_with(software: &str, version: &str, nether_folder: &str, plugin: Option<(&str, &str)>) {
-    let dir = data_dir(software);
+/// `plugin`: (source, project slug, the name it logs as) to install first.
+async fn run_server_with(
+    name: &str,
+    software: &str,
+    version: &str,
+    nether_folder: &str,
+    plugin: Option<(&str, &str, &str)>,
+) {
+    let dir = data_dir(name);
     let app = Lodestone::boot(dir.clone()).await;
     assert_eq!(app.get("/system").await["runtime"]["available"], true, "Docker must be running");
 
@@ -153,12 +159,12 @@ async fn run_server_with(software: &str, version: &str, nether_folder: &str, plu
     let id = instance["id"].as_str().unwrap().to_owned();
     let world_id = instance["worldId"].as_str().unwrap().to_owned();
     let profile_id = instance["profileId"].as_str().unwrap().to_owned();
-    if let Some((slug, _)) = plugin {
-        // A real install plan and download from Modrinth.
+    if let Some((source, slug, _)) = plugin {
+        // A real install plan and download from the source.
         let plan = app
             .post(
                 &format!("/profiles/{profile_id}/content/plan"),
-                json!({ "items": [{ "provider": "modrinth", "projectId": slug }] }),
+                json!({ "items": [{ "provider": source, "projectId": slug }] }),
             )
             .await;
         let items: Vec<Value> = plan["install"]
@@ -172,7 +178,7 @@ async fn run_server_with(software: &str, version: &str, nether_folder: &str, plu
     }
     app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
     app.wait_state(&id, "running").await;
-    if let Some((_, logs_as)) = plugin {
+    if let Some((_, _, logs_as)) = plugin {
         let console = app.get(&format!("/instances/{id}/console?tail=2000")).await;
         let enabled = console
             .as_array()
@@ -228,7 +234,12 @@ async fn vanilla_server_runs_in_docker() {
 
 #[tokio::test]
 async fn paper_server_runs_in_docker() {
-    run_server_with("paper", "1.21.4", "{folder}_nether", Some(("chunky", "Chunky"))).await;
+    run_server_with("paper", "paper", "1.21.4", "{folder}_nether", Some(("modrinth", "chunky", "Chunky"))).await;
+}
+
+#[tokio::test]
+async fn paper_runs_a_hangar_plugin_in_docker() {
+    run_server_with("paper-hangar", "paper", "1.21.4", "{folder}_nether", Some(("hangar", "Chunky", "Chunky"))).await;
 }
 
 #[tokio::test]

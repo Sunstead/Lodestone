@@ -19,4 +19,9 @@ requiredBy: Array<string>,
  * Built for the profile's loader and Minecraft version. Uploads are
  * assumed to be.
  */
-compatible: boolean, update: AvailableUpdate | null, installedAt: string, };
+compatible: boolean, update: AvailableUpdate | null, 
+/**
+ * The publisher doesn't allow Lodestone to download this file: get it
+ * from this page and upload it. Servers won't start until then.
+ */
+manualDownload: string | null, installedAt: string, };

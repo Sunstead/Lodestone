@@ -842,3 +842,118 @@ async fn neoforge_runs_its_installer_once() {
     assert_eq!(index["kind"], "mods");
     assert_eq!(index["loaders"], json!(["neoforge"]));
 }
+
+/* --------------------------- more sources (M7) --------------------------- */
+
+fn source<'a>(index: &'a Value, id: &str) -> &'a Value {
+    index["providers"].as_array().unwrap().iter().find(|p| p["id"] == id).unwrap()
+}
+
+#[tokio::test]
+async fn hangar_serves_paper_and_curseforge_waits_for_a_key() {
+    let app = TestApp::new().await;
+    let paper = paper_profile(&app).await;
+    let index = app.get(&format!("/profiles/{paper}/content")).await;
+    assert_eq!(source(&index, "modrinth")["available"], true);
+    assert_eq!(source(&index, "hangar")["available"], true);
+    assert_eq!(source(&index, "hangar")["description"], "Paper plugins");
+    let curseforge = source(&index, "curseforge");
+    assert_eq!(curseforge["available"], false);
+    assert!(curseforge["reason"].as_str().unwrap().contains("API key"));
+
+    let (_, fabric) = app.post("/profiles", profile_spec("fabric", "1.21.4")).await;
+    let fabric_index = app.get(&format!("/profiles/{}/content", fabric["id"].as_str().unwrap())).await;
+    assert_eq!(source(&fabric_index, "hangar")["available"], false);
+
+    // Hangar search and install.
+    let results = app.get(&format!("/profiles/{paper}/content/search?provider=hangar&q=guard")).await;
+    let hit = &results["hits"][0];
+    assert_eq!((hit["provider"].as_str(), hit["name"].as_str()), (Some("hangar"), Some("WorldGuard")));
+    let (status, plan) = app
+        .post(
+            &format!("/profiles/{paper}/content/plan"),
+            json!({ "items": [{ "provider": "hangar", "projectId": hit["id"] }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    assert_eq!(plan["install"].as_array().unwrap().len(), 2);
+    let (status, err) =
+        app.call(Method::GET, &format!("/profiles/{paper}/content/search?provider=curseforge&q=x"), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+
+    // An admin adds a key; it's never sent back.
+    let (status, settings) =
+        app.call(Method::PATCH, "/settings", Some(json!({ "curseforgeApiKey": "test-key" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settings["curseforgeKeySet"], true);
+    assert!(!settings.to_string().contains("test-key"));
+    let index = app.get(&format!("/profiles/{paper}/content")).await;
+    assert_eq!(source(&index, "curseforge")["available"], true);
+}
+
+#[tokio::test]
+async fn restricted_files_are_downloaded_by_hand_and_checked() {
+    let app = TestApp::with(|config| config.curseforge_api_key = Some("test-key".into())).await;
+    let instance = app.create_instance(json!({})).await;
+    let (id, profile) = (instance["id"].as_str().unwrap(), instance["profileId"].as_str().unwrap());
+
+    // EssentialsX's author disabled third-party downloads on (fake) CurseForge.
+    let (_, plan) = app
+        .post(
+            &format!("/profiles/{profile}/content/plan"),
+            json!({ "items": [{ "provider": "curseforge", "projectId": "fk-essentialsx" }] }),
+        )
+        .await;
+    let item = &plan["install"][0];
+    assert!(item["manualDownload"].as_str().unwrap().starts_with("https://www.curseforge.com/"), "{plan}");
+    let (status, index) = app
+        .post(
+            &format!("/profiles/{profile}/content"),
+            json!({ "items": [{ "provider": "curseforge", "projectId": item["projectId"], "versionId": item["versionId"] }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    let entry = index["entries"][0].clone();
+    assert!(entry["manualDownload"].is_string());
+    let entry_id = entry["id"].as_str().unwrap();
+
+    // Servers won't start without it.
+    let (status, err) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    assert_eq!(status, StatusCode::OK, "start is accepted; preparing fails: {err}");
+    let failed = app.wait_state(id, "error").await;
+    assert!(failed["lastError"].as_str().unwrap().contains("downloaded by hand"), "{failed}");
+
+    // The wrong file is refused; the right one is accepted.
+    let path = format!("/profiles/{profile}/content/{entry_id}/file");
+    let (status, err) = upload(&app, &path, "EssentialsX.jar", b"not it".to_vec()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("checksum"), "{err}");
+    let bytes = format!("lodestone fake content: {}\n", item["versionId"].as_str().unwrap()).into_bytes();
+    let (status, index) = upload(&app, &path, "EssentialsX-2.21.0.jar", bytes).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["entries"][0]["manualDownload"], Value::Null);
+
+    app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    app.wait_state(id, "running").await;
+    let plugins = app.state.paths.profile(profile).join("plugins");
+    assert!(plugins.join(entry["filename"].as_str().unwrap()).is_file());
+}
+
+#[tokio::test]
+async fn the_general_upload_also_fills_a_manual_download() {
+    let app = TestApp::with(|config| config.curseforge_api_key = Some("test-key".into())).await;
+    let profile = paper_profile(&app).await;
+    let (_, index) = app
+        .post(
+            &format!("/profiles/{profile}/content"),
+            json!({ "items": [{ "provider": "curseforge", "projectId": "fk-essentialsx", "versionId": "fk-essentialsx-2.21.0" }] }),
+        )
+        .await;
+    assert!(index["entries"][0]["manualDownload"].is_string());
+    let bytes = b"lodestone fake content: fk-essentialsx-2.21.0\n".to_vec();
+    let (status, index) = upload(&app, &format!("/profiles/{profile}/content/upload"), "whatever.jar", bytes).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    let entries = index["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "matched the waiting entry instead of adding another");
+    assert_eq!(entries[0]["manualDownload"], Value::Null);
+}

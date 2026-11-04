@@ -1571,7 +1571,7 @@ const profileOf = (id: string): Profile => {
 export const getContent = (id: string): ContentIndex => demoContent.index(profileOf(id));
 export const searchContent = (
   id: string,
-  params: { q: string; sort?: string; offset?: number; limit?: number },
+  params: { q: string; provider?: ContentSource; sort?: string; offset?: number; limit?: number },
 ): ContentSearchResult => demoContent.search(profileOf(id), params);
 export const getContentVersions = (id: string, provider: ContentSource, project: string): ContentVersion[] =>
   demoContent.versions(profileOf(id), provider, project);
@@ -1583,8 +1583,10 @@ export const setContentEnabled = (id: string, entry: string, enabled: boolean): 
 export const removeContent = (id: string, entry: string): ContentIndex => demoContent.remove(profileOf(id), entry);
 export const updateContent = (id: string, entry: string): ContentIndex => demoContent.update(profileOf(id), entry);
 export const checkContentUpdates = (id: string): ContentIndex => demoContent.checkUpdates(profileOf(id));
-export const uploadContent = (id: string, filename: string, size: number): ContentIndex =>
-  demoContent.upload(profileOf(id), filename, size);
+export const uploadContent = (id: string, filename: string, size: number, text?: string): ContentIndex =>
+  demoContent.upload(profileOf(id), filename, size, text);
+export const provideContentFile = (id: string, entry: string, filename: string, text: string): ContentIndex =>
+  demoContent.provideFile(profileOf(id), entry, filename, text);
 
 const demoJobs: Job[] = [];
 
@@ -2231,6 +2233,7 @@ export { ADVANCEMENTS, DEATHS, AMBIENT_LINES, playerLine, int, pick };
 const settings: AppSettings = {
   publicAddress: '',
   defaultJavaArgs: '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200',
+  curseforgeKeySet: false,
 };
 
 /** The demo can't read zips: it adds a generated world named after the file. */
@@ -2266,6 +2269,11 @@ export function getSettings(): AppSettings {
 export function updateSettings(body: UpdateSettingsRequest): AppSettings {
   if (body.publicAddress !== undefined) settings.publicAddress = body.publicAddress.trim();
   if (body.defaultJavaArgs !== undefined) settings.defaultJavaArgs = body.defaultJavaArgs.trim();
+  if (body.curseforgeApiKey !== undefined) {
+    if (/\s/.test(body.curseforgeApiKey.trim())) throw new Error("That doesn't look like a CurseForge API key.");
+    settings.curseforgeKeySet = body.curseforgeApiKey.trim() !== '';
+    demoContent.setCurseforgeKey(settings.curseforgeKeySet);
+  }
   return getSettings();
 }
 

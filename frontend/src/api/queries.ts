@@ -153,6 +153,8 @@ export function useUpdateSettings(): UseMutationResult<AppSettings, Error, Updat
     onSuccess: (data) => {
       queryClient.setQueryData(keys.settings, data);
       void queryClient.invalidateQueries({ queryKey: keys.instances });
+      // Which mod sources are usable (CurseForge's key) shows on configurations.
+      void queryClient.invalidateQueries({ queryKey: keys.profiles });
     },
   });
 }
@@ -336,10 +338,15 @@ export function useContent(profileId: string): UseQueryResult<ContentIndex> {
 }
 
 /** Paged search; `fetchNextPage` loads more. */
-export function useContentSearch(profileId: string, q: string, sort: api.ContentSearchParams['sort'] = 'relevance') {
+export function useContentSearch(
+  profileId: string,
+  q: string,
+  sort: api.ContentSearchParams['sort'] = 'relevance',
+  provider: ContentSource = 'modrinth',
+) {
   return useInfiniteQuery({
-    queryKey: keys.contentSearch(profileId, q, sort ?? 'relevance'),
-    queryFn: ({ pageParam }) => api.searchContent(profileId, { q, sort, offset: pageParam, limit: 20 }),
+    queryKey: [...keys.contentSearch(profileId, q, sort ?? 'relevance'), provider],
+    queryFn: ({ pageParam }) => api.searchContent(profileId, { q, sort, provider, offset: pageParam, limit: 20 }),
     initialPageParam: 0,
     getNextPageParam: (last: ContentSearchResult) =>
       last.offset + last.hits.length < last.total ? last.offset + last.hits.length : undefined,
@@ -394,6 +401,10 @@ export const useCheckContentUpdates = (profileId: string) =>
   useContentMutation(profileId, (_: void) => api.checkContentUpdates(profileId));
 export const useUploadContent = (profileId: string) =>
   useContentMutation(profileId, (file: File) => api.uploadContent(profileId, file));
+export const useProvideContentFile = (profileId: string) =>
+  useContentMutation(profileId, ({ entry, file }: { entry: string; file: File }) =>
+    api.provideContentFile(profileId, entry, file),
+  );
 
 export function useImportModpack(): UseMutationResult<Job, Error, File> {
   const queryClient = useQueryClient();

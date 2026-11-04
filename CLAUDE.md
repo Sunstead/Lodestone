@@ -68,7 +68,9 @@ The dev scripts pass `--dev-user dev` unless `LODESTONE_OIDC_ISSUER` is set.
   - Cookie-authenticated changes need `X-Lodestone-Request: 1` (the client always sends it).
   - The EULA is per user (`PATCH /me`), not an app setting.
 - **Content** (`content/`):
-  - A profile's mods and plugins are a lockfile (`profile_content`) pinned by sha512. Jars live in the blob cache and are linked into `profiles/<id>/plugins|mods` by `install::sync_files` when a server prepares.
+  - A profile's mods and plugins are a lockfile (`profile_content`) pinned by hash (`FileRef`: sha512 for Modrinth, sha256 for Hangar, sha1 for CurseForge). Jars live in the blob cache and are linked into `profiles/<id>/plugins|mods` by `install::sync_files` when a server prepares.
+  - Sources: Modrinth, Hangar (Paper only) and CurseForge, which needs the `curseforge_key` from Settings or the environment. Each source's `unavailable()` gives the reason it can't be used, and the UI shows it.
+  - Files that can't be downloaded automatically have a `manual_url`. The user uploads them (`POST /profiles/{id}/content/{entry}/file`, or the general upload, which matches by hash), and preparing a server fails with `content_missing` until they do.
   - Install plans (`content/plan.rs`) resolve dependencies; the UI shows the plan, then applies its `install` list.
   - The demo mirrors all of this in `frontend/src/api/demo-content.ts`.
 - **Runtimes:** `runtime::Runtime` is the seam.

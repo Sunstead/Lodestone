@@ -21,7 +21,8 @@ Lodestone ships no Minecraft code, mods or Java runtimes:
   - PaperMC's Fill API for Paper
   - Fabric meta for Fabric
   - Forge and NeoForge installers from their Mavens. Each installer runs once per version in a throwaway JRE container into `cache/installs/<key>`, and servers launch with the `@libraries/.../unix_args.txt` it writes.
-- Mods and plugins come from Modrinth, pinned by sha512 in each profile's lockfile, or from an upload.
+- Mods and plugins come from Modrinth, Hangar (Paper plugins) or CurseForge (with an API key), pinned by hash in each profile's lockfile, or from an upload.
+- Some files can't be downloaded by Lodestone: their authors disabled third-party downloads on CurseForge, or the files are hosted elsewhere on Hangar. These are recorded as manual downloads. The user downloads the file and uploads it, Lodestone checks it against the published hash, and servers won't start until it's there. This is how Prism handles them.
 - Every download is checked against its published hash and stored content-addressed in `cache/blobs/<algo>/<hash>`.
 - Servers run in stock `eclipse-temurin:<java>-jre` images. The Java major version comes from Mojang's version metadata.
 - `eula.txt` is written only after the server's owner accepts the Minecraft EULA in Settings.
@@ -48,7 +49,7 @@ scripts/    dev.mjs, with-backend.mjs
 | `model` | Every wire type. `cargo test` exports them to `frontend/src/api/generated/`. |
 | `api/` | Axum routes under `/api/v1`. Thin: validation, ownership checks, DTO assembly. |
 | `auth/` | OIDC (Authentik), ported from Solstice: offline JWKS verification, the server-side PKCE code flow (`/auth/login`, `/auth/callback`, `/auth/logout`), session cookies, the CSRF guard, `CurrentUser` and ownership checks. `--dev-user` for development. |
-| `content/` | Mods and plugins. `ContentProvider` (Modrinth, plus an offline fake that shares `shared/fake-content.json` with the demo), install plans, the per-profile lockfile, jar uploads, `.mrpack` import, and linking jars into `plugins/` or `mods/` on start. |
+| `content/` | Mods and plugins. `ContentProvider`s: Modrinth (sha512, batch update check), Hangar (sha256, Paper only), CurseForge (sha1, API key from Settings or `LODESTONE_CURSEFORGE_API_KEY`), and offline fakes of all three over `shared/fake-content.json`, which the demo shares. Also install plans, the per-profile lockfile, manual downloads, jar uploads, `.mrpack` import, and linking jars into `plugins/` or `mods/` on start. |
 | `level`, `worldfiles` | `level.dat` (version that last saved a world, seed, day), world zip import and export. |
 | `store` + `migrations/` | SQLite. Assets are JSON documents with an `owner_id`. Relational rules live in the schema (`UNIQUE(world_id)`, `ON DELETE RESTRICT`). Users, sessions (hashed tokens) and sign-in flows. |
 | `supervisor` | Per-instance state machine, console ring buffer, RCON, player tracking, crash policy, metrics sampling, boot-time reconcile. |
@@ -133,8 +134,8 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 | **Contract parity**: the same scenarios against demo and a live backend | `frontend/src/api/contract.test.ts` | `just test-contract` |
 | Browser E2E: demo, full stack on the fake runtime, and sign-in through a stand-in OIDC provider (`e2e/mock-oidc.mjs`) | `e2e/` | `just e2e` |
 | Auth: tokens, sessions, CSRF, ownership, groups (mock OIDC provider) | `backend/crates/lodestone/src/auth/tests.rs` | `cargo test` |
-| Real containers: Vanilla, Paper with a real Modrinth plugin, Fabric, NeoForge (installer), reattach | `backend/crates/lodestone/tests/docker.rs` | `just test-docker` |
-| Live publisher APIs (Mojang, PaperMC, Fabric, Forge, NeoForge, Modrinth) | `#[ignore]` tests in `software/real.rs`, `content/modrinth.rs` | `just test-live` |
+| Real containers: Vanilla, Paper with a real Modrinth plugin and a real Hangar plugin, Fabric, NeoForge (installer), reattach | `backend/crates/lodestone/tests/docker.rs` | `just test-docker` |
+| Live publisher APIs (Mojang, PaperMC, Fabric, Forge, NeoForge, Modrinth, Hangar) | `#[ignore]` tests in `software/real.rs`, `content/modrinth.rs`, `content/hangar.rs` | `just test-live` |
 | A joinable server, end to end | `scripts/smoke.mjs` | `just smoke` (`--keep` to play) |
 
 ## Roadmap
@@ -147,5 +148,10 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 - [x] **M4** Worlds: level.dat (version guard, seed, offline day/time), zip import and download. *Not done:* converting a Paper-layout world back to vanilla.
 - [x] **M5** Modrinth: search, install plans with dependencies, update checks, uploads, `.mrpack` import. Mods panel rewrite.
 - [x] **M6** Accounts through Authentik (OIDC) with per-user ownership, a Docker image and compose file (`docs/deploy.md`). *Not done:* a first-run onboarding wizard (Settings covers the EULA and public address).
-- [ ] **M7** More content sources: Hangar (Paper plugins), and CurseForge (needs an API key; restricted files go through a manual download, as in Prism). Both slot in as `ContentProvider`s.
-- [ ] Later: layout conversion, per-user quotas (servers, memory), and the CurseForge modpack format.
+- [x] **M7** Hangar (Paper plugins) and CurseForge (an API key in Settings; restricted files become manual downloads, checked against their sha1). The CurseForge client is tested against the API's documented shapes; it hasn't run against the live API, which needs a key.
+- [ ] Later:
+  - layout conversion
+  - per-user quotas (servers, memory)
+  - the CurseForge modpack format
+  - recognising uploaded jars on CurseForge (by murmur2 fingerprint)
+  - CurseForge update checks in one request (fingerprints) instead of one per project

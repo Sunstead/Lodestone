@@ -117,8 +117,14 @@ pub async fn list_users(State(app): State<AppState>, user: CurrentUser) -> AppRe
     ))
 }
 
+async fn settings(app: &AppState) -> AppResult<AppSettings> {
+    let mut settings = app.store.settings().await?;
+    settings.curseforge_key_set = app.curseforge_key.get().is_some();
+    Ok(settings)
+}
+
 pub async fn get_settings(State(app): State<AppState>, _user: CurrentUser) -> AppResult<Json<AppSettings>> {
-    Ok(Json(app.store.settings().await?))
+    Ok(Json(settings(&app).await?))
 }
 
 pub async fn patch_settings(
@@ -140,11 +146,21 @@ pub async fn patch_settings(
     if let Some(args) = patch.default_java_args {
         settings.default_java_args = args.trim().to_owned();
     }
+    if let Some(key) = patch.curseforge_api_key {
+        let key = key.trim().to_owned();
+        if key.chars().any(char::is_whitespace) {
+            return Err(AppError::bad_request("That doesn't look like a CurseForge API key."));
+        }
+        app.store.put_value(crate::app::CURSEFORGE_KEY, &key).await?;
+        app.curseforge_key.set(Some(key));
+        // Which sources configurations can use just changed.
+        app.events.changed(ResourceKind::Profiles, None);
+    }
     app.store.put_settings(&settings).await?;
     app.events.changed(ResourceKind::Settings, None);
     // Addresses are rendered on instances.
     app.events.changed(ResourceKind::Instances, None);
-    Ok(Json(settings))
+    Ok(Json(self::settings(&app).await?))
 }
 
 pub async fn system_info(State(app): State<AppState>, _user: CurrentUser) -> AppResult<Json<SystemInfo>> {

@@ -13,7 +13,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{project_hit, ContentProvider, FileRef, ProjectInfo, ResolvedVersion, SearchQuery, SearchSort, Target};
+use super::{
+    project_hit, ContentProvider, ContentRecord, FileRef, ProjectInfo, ResolvedVersion, SearchQuery, SearchSort, Target,
+};
 use crate::error::{AppError, AppResult};
 use crate::model::{
     ContentDependency, ContentSearchResult, ContentSource, ContentVersion, DependencyKind, ModKind, VersionChannel,
@@ -173,7 +175,12 @@ impl Version {
                     .collect(),
                 compatible,
             },
-            file: FileRef { url: Some(file.url), sha512, sha1: file.hashes.get("sha1").cloned(), inline: None },
+            file: FileRef {
+                url: Some(file.url),
+                sha512: Some(sha512),
+                sha1: file.hashes.get("sha1").cloned(),
+                ..Default::default()
+            },
         })
     }
 }
@@ -348,26 +355,29 @@ impl ContentProvider for Modrinth {
         version.resolve(target)
     }
 
-    async fn latest_for_hashes(
-        &self,
-        sha512: &[String],
-        target: &Target,
-    ) -> AppResult<HashMap<String, ResolvedVersion>> {
-        if sha512.is_empty() {
+    /// One request for everything, by sha512 (`/version_files/update`), like Prism.
+    async fn latest(&self, records: &[ContentRecord], target: &Target) -> AppResult<HashMap<String, ResolvedVersion>> {
+        let hashes: Vec<String> = records.iter().filter_map(|r| r.file.sha512.clone()).collect();
+        if hashes.is_empty() {
             return Ok(HashMap::new());
         }
         let found: HashMap<String, Version> = self
             .post(
                 "/version_files/update",
                 json!({
-                    "hashes": sha512,
+                    "hashes": hashes,
                     "algorithm": "sha512",
                     "loaders": target.loaders,
                     "game_versions": [target.game_version],
                 }),
             )
             .await?;
-        Ok(found.into_iter().filter_map(|(hash, version)| Some((hash, version.resolve(target).ok()?))).collect())
+        let mut by_hash: HashMap<String, ResolvedVersion> =
+            found.into_iter().filter_map(|(hash, version)| Some((hash, version.resolve(target).ok()?))).collect();
+        Ok(records
+            .iter()
+            .filter_map(|record| Some((record.id.clone(), by_hash.remove(record.file.sha512.as_ref()?)?)))
+            .collect())
     }
 
     async fn identify(&self, sha512: &[String], target: &Target) -> AppResult<HashMap<String, ResolvedVersion>> {
@@ -386,7 +396,7 @@ impl ContentProvider for Modrinth {
             let Ok(mut resolved) = version.resolve(target) else { continue };
             resolved.version.filename = filename;
             resolved.version.size_bytes = size;
-            resolved.file.sha512 = hash.clone();
+            resolved.file.sha512 = Some(hash.clone());
             out.insert(hash, resolved);
         }
         Ok(out)
@@ -488,7 +498,7 @@ mod tests {
         let v = &versions[0];
         assert!(v.version.compatible);
         assert_eq!(v.version.filename, "worldguard-bukkit-7.0.13.jar", "the primary file, not sources");
-        assert_eq!(v.file.sha512, "aa");
+        assert_eq!(v.file.sha512.as_deref(), Some("aa"));
         assert_eq!(v.version.dependencies[0].kind, DependencyKind::Required);
 
         let project = modrinth.project("worldguard").await.unwrap();
@@ -507,8 +517,13 @@ mod tests {
             .mount(&server)
             .await;
         let modrinth = Modrinth::new(reqwest::Client::new(), server.uri());
-        let found = modrinth.latest_for_hashes(&["old-hash".into()], &paper()).await.unwrap();
-        assert_eq!(found["old-hash"].version.version_number, "7.0.14");
+        let record = ContentRecord {
+            id: "e1".into(),
+            file: FileRef { sha512: Some("old-hash".into()), ..Default::default() },
+            ..crate::content::tests::record()
+        };
+        let found = modrinth.latest(&[record], &paper()).await.unwrap();
+        assert_eq!(found["e1"].version.version_number, "7.0.14");
     }
 
     #[tokio::test]
@@ -531,7 +546,8 @@ mod tests {
         assert!(versions.iter().all(|v| v.version.compatible));
         let latest = &versions[0];
         assert!(latest.version.dependencies.iter().any(|dep| dep.kind == DependencyKind::Required));
-        let updates = modrinth.latest_for_hashes(std::slice::from_ref(&latest.file.sha512), &paper()).await.unwrap();
-        assert!(updates.contains_key(&latest.file.sha512));
+        let record = ContentRecord { id: "e1".into(), file: latest.file.clone(), ..crate::content::tests::record() };
+        let updates = modrinth.latest(&[record], &paper()).await.unwrap();
+        assert!(updates.contains_key("e1"));
     }
 }

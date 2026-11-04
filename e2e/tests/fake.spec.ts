@@ -49,7 +49,7 @@ test('install a plugin with its dependency from the configuration', async ({ pag
   const profile = await created.json();
 
   await page.goto(`/?profile=${profile.id}&page=mods`);
-  await page.getByRole('tab', { name: 'Browse Modrinth' }).click();
+  await page.getByRole('tab', { name: 'Browse' }).click();
   await page.getByLabel('Search Modrinth plugins').fill('worldguard');
   // The search is debounced: wait for the results to narrow.
   await expect(page.getByRole('link', { name: 'WorldEdit', exact: true })).toHaveCount(0);

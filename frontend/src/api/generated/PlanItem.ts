@@ -13,4 +13,8 @@ requiredBy: string | null,
 /**
  * The installed version this replaces.
  */
-replaces: InstalledVersion | null, };
+replaces: InstalledVersion | null, 
+/**
+ * Has to be downloaded by hand from this page, then uploaded.
+ */
+manualDownload: string | null, };

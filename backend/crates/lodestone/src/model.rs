@@ -989,6 +989,8 @@ impl ContentSource {
 pub struct ContentProviderInfo {
     pub id: ContentSource,
     pub label: String,
+    /// What it offers, e.g. `Mods and plugins` or `Paper plugins`.
+    pub description: String,
     /// False when it can't serve this profile (e.g. Hangar has no mods) or
     /// needs setup (CurseForge without an API key); `reason` says why.
     pub available: bool,
@@ -1126,6 +1128,8 @@ pub struct PlanItem {
     pub required_by: Option<String>,
     /// The installed version this replaces.
     pub replaces: Option<InstalledVersion>,
+    /// Has to be downloaded by hand from this page, then uploaded.
+    pub manual_download: Option<String>,
 }
 
 /// An optional dependency the user may add.
@@ -1204,6 +1208,9 @@ pub struct ContentEntry {
     /// assumed to be.
     pub compatible: bool,
     pub update: Option<AvailableUpdate>,
+    /// The publisher doesn't allow Lodestone to download this file: get it
+    /// from this page and upload it. Servers won't start until then.
+    pub manual_download: Option<String>,
     pub installed_at: String,
 }
 
@@ -1315,6 +1322,9 @@ pub struct AppSettings {
     /// Host players type to connect, e.g. `play.example.com`. Blank = `localhost`.
     pub public_address: String,
     pub default_java_args: String,
+    /// A CurseForge API key is set. The key itself is never sent back.
+    #[serde(default)]
+    pub curseforge_key_set: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1325,6 +1335,9 @@ pub struct UpdateSettingsRequest {
     pub public_address: Option<String>,
     #[ts(optional)]
     pub default_java_args: Option<String>,
+    /// From console.curseforge.com. An empty string removes it.
+    #[ts(optional)]
+    pub curseforge_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

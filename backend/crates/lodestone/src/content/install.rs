@@ -31,10 +31,49 @@ pub async fn index(app: &AppState, profile_id: &str) -> AppResult<ContentIndex> 
         kind: profile.software_id.content_kind(),
         loaders: Target::loaders_for(profile.software_id),
         game_version: profile.version.clone(),
-        entries: entries(&records, target.as_ref()),
+        entries: entries(&records, target.as_ref(), |file| is_cached(app, file)),
         checked_at: app.store.get_value(&checked_key(profile_id)).await?,
         providers: target.as_ref().map(|target| app.content.info(target)).unwrap_or_default(),
     })
+}
+
+fn is_cached(app: &AppState, file: &FileRef) -> bool {
+    file.hash().and_then(|hash| app.cache.cached(&hash)).is_some()
+}
+
+/// The file's blob: from the cache, else downloaded. `None` for a manual
+/// download nobody has uploaded yet.
+async fn fetch_file(
+    app: &AppState,
+    file: &FileRef,
+    filename: &str,
+    size: u64,
+) -> AppResult<Option<std::path::PathBuf>> {
+    if let Some(cached) = file.hash().and_then(|hash| app.cache.cached(&hash)) {
+        return Ok(Some(cached));
+    }
+    if file.is_manual() {
+        return Ok(None);
+    }
+    Ok(Some(app.cache.fetch(&file.artifact(filename, size)?, None).await?))
+}
+
+/// Puts bytes in the cache under `file`'s hash (they've been checked).
+async fn cache_bytes(app: &AppState, file: &FileRef, filename: &str, bytes: Vec<u8>) -> AppResult<()> {
+    let size = bytes.len() as u64;
+    let hash = match file.hash() {
+        Some(hash) => hash,
+        None => Hash { algo: HashAlgo::Sha512, hex: HashAlgo::Sha512.digest(&bytes) },
+    };
+    let artifact = Artifact {
+        filename: filename.to_owned(),
+        source: Source::Inline(bytes),
+        hash: Some(hash),
+        size: Some(size),
+        pin: None,
+    };
+    app.cache.fetch(&artifact, None).await?;
+    Ok(())
 }
 
 async fn target_of(app: &AppState, profile_id: &str) -> AppResult<Target> {
@@ -102,8 +141,8 @@ pub async fn apply(app: &AppState, profile_id: &str, items: &[ContentRef]) -> Ap
         let total = resolved.len();
         for (index, (_, version)) in resolved.iter().enumerate() {
             job.progress(Some(index as f64 / total as f64), format!("Downloading {}", version.version.filename)).await;
-            let artifact = version.file.artifact(&version.version.filename, version.version.size_bytes)?;
-            app.cache.fetch(&artifact, None).await?;
+            // Manual downloads are recorded now and uploaded by the user later.
+            fetch_file(app, &version.file, &version.version.filename, version.version.size_bytes).await?;
         }
         let existing = app.store.list_content(profile_id).await?;
         let now = now_iso();
@@ -204,22 +243,28 @@ pub async fn check_updates(app: &AppState, profile_id: &str) -> AppResult<Conten
         if provider.unavailable(&target).is_some() {
             continue;
         }
-        let mine: Vec<&ContentRecord> = records.iter().filter(|r| r.provider == provider.id()).collect();
+        let mine: Vec<ContentRecord> = records.iter().filter(|r| r.provider == provider.id()).cloned().collect();
         if mine.is_empty() {
             continue;
         }
-        let hashes: Vec<String> = mine.iter().map(|r| r.file.sha512.clone()).collect();
-        let latest = provider.latest_for_hashes(&hashes, &target).await?;
+        // One source being down shouldn't hide the others' updates.
+        let latest = match provider.latest(&mine, &target).await {
+            Ok(latest) => latest,
+            Err(err) => {
+                tracing::warn!(provider = provider.id().as_str(), error = %err, "update check failed");
+                continue;
+            }
+        };
         for record in mine {
             let update = latest
-                .get(&record.file.sha512)
+                .get(&record.id)
                 .filter(|found| record.version_id.as_deref() != Some(found.version.id.as_str()))
                 .map(|found| AvailableUpdate {
                     version_id: found.version.id.clone(),
                     version_name: found.version.version_number.clone(),
                 });
             if update != record.update {
-                let mut record = record.clone();
+                let mut record = record;
                 record.update = update;
                 app.store.put_content(profile_id, &record).await?;
             }
@@ -236,6 +281,18 @@ pub async fn check_updates(app: &AppState, profile_id: &str) -> AppResult<Conten
 pub async fn upload(app: &AppState, profile_id: &str, filename: &str, bytes: Vec<u8>) -> AppResult<ContentIndex> {
     let target = target_of(app, profile_id).await?;
     let filename = safe_filename(filename).ok_or_else(|| AppError::bad_request("Upload a .jar file."))?;
+    // The file a manual download is waiting for: its published hash already
+    // vouches for it.
+    {
+        let _guard = app.content_lock.lock().await;
+        let existing = app.store.list_content(profile_id).await?;
+        if let Some(waiting) = existing.iter().find(|r| r.file.is_manual() && r.file.matches(&bytes)) {
+            cache_bytes(app, &waiting.file, &waiting.filename, bytes).await?;
+            changed(app, profile_id);
+            drop(_guard);
+            return index(app, profile_id).await;
+        }
+    }
     let meta = jarmeta::read(&bytes).ok_or_else(|| AppError::bad_request(format!("{filename} isn't a valid jar.")))?;
     if let Some(kind) = meta.kind.filter(|kind| *kind != target.kind) {
         let (is, wants) = match kind {
@@ -247,24 +304,13 @@ pub async fn upload(app: &AppState, profile_id: &str, filename: &str, bytes: Vec
             target.software.label()
         )));
     }
-    let sha512 = HashAlgo::Sha512.digest(&bytes);
-    let sha1 = HashAlgo::Sha1.digest(&bytes);
+    let hashes = FileRef::of(&bytes);
+    let sha512 = hashes.sha512.clone().unwrap_or_default();
     let size = bytes.len() as u64;
-    app.cache
-        .fetch(
-            &Artifact {
-                filename: filename.clone(),
-                source: Source::Inline(bytes),
-                hash: Some(Hash { algo: HashAlgo::Sha512, hex: sha512.clone() }),
-                size: Some(size),
-                pin: None,
-            },
-            None,
-        )
-        .await?;
 
     let _guard = app.content_lock.lock().await;
     let existing = app.store.list_content(profile_id).await?;
+    cache_bytes(app, &hashes, &filename, bytes).await?;
     let mut record = None;
     for provider in app.content.all() {
         if provider.unavailable(&target).is_some() {
@@ -284,7 +330,7 @@ pub async fn upload(app: &AppState, profile_id: &str, filename: &str, bytes: Vec
             false,
             now_iso(),
         );
-        found_record.file.sha512 = sha512.clone();
+        found_record.file.sha512 = Some(sha512.clone());
         record = Some(found_record);
         break;
     }
@@ -307,7 +353,7 @@ pub async fn upload(app: &AppState, profile_id: &str, filename: &str, bytes: Vec
                 description: meta.description.unwrap_or_default(),
                 icon_url: None,
                 page_url: None,
-                file: FileRef { url: None, sha512, sha1: Some(sha1), inline: None },
+                file: hashes.clone(),
                 enabled: true,
                 dependency: false,
                 dependencies: vec![],
@@ -319,6 +365,45 @@ pub async fn upload(app: &AppState, profile_id: &str, filename: &str, bytes: Vec
         }
     };
     app.store.put_content(profile_id, &record).await?;
+    changed(app, profile_id);
+    drop(_guard);
+    index(app, profile_id).await
+}
+
+/// Supplies the file for an entry Lodestone couldn't download (a manual
+/// download), after checking it's exactly the published file.
+pub async fn provide_file(
+    app: &AppState,
+    profile_id: &str,
+    entry_id: &str,
+    upload_name: &str,
+    bytes: Vec<u8>,
+) -> AppResult<ContentIndex> {
+    let _guard = app.content_lock.lock().await;
+    let record = app
+        .store
+        .list_content(profile_id)
+        .await?
+        .into_iter()
+        .find(|record| record.id == entry_id)
+        .ok_or_else(|| AppError::not_found("mod or plugin", entry_id))?;
+    let unverifiable = record.file.hash().is_none();
+    if !unverifiable && !record.file.matches(&bytes) {
+        let page = record.file.manual_url.as_deref().unwrap_or("its download page");
+        return Err(AppError::bad_request(format!(
+            "{upload_name} isn't {}: its checksum doesn't match. Download exactly that file from {page}.",
+            record.filename
+        )));
+    }
+    let mut record = record;
+    if unverifiable {
+        // Nothing published to check against (some external links): pin
+        // what the user gave us from now on.
+        record.file = FileRef { manual_url: record.file.manual_url.clone(), ..FileRef::of(&bytes) };
+        record.size_bytes = bytes.len() as u64;
+        app.store.put_content(profile_id, &record).await?;
+    }
+    cache_bytes(app, &record.file, &record.filename, bytes).await?;
     changed(app, profile_id);
     drop(_guard);
     index(app, profile_id).await
@@ -337,16 +422,26 @@ pub async fn sync_files(app: &AppState, profile_id: &str, job: Option<&JobHandle
     let records = app.store.list_content(profile_id).await?;
     let wanted: Vec<&ContentRecord> = records.iter().filter(|r| r.enabled && r.kind == target.kind).collect();
     let total = wanted.len().max(1);
+    let mut missing = vec![];
     for (index, record) in wanted.iter().enumerate() {
         if let Some(job) = job {
             job.progress(Some(index as f64 / total as f64), format!("Getting {}", record.filename)).await;
         }
-        let hash = Hash { algo: HashAlgo::Sha512, hex: record.file.sha512.clone() };
-        let blob = match app.cache.cached(&hash) {
-            Some(blob) => blob,
-            None => app.cache.fetch(&record.file.artifact(&record.filename, record.size_bytes)?, None).await?,
-        };
-        place(&blob, &dir.join(&record.filename))?;
+        match fetch_file(app, &record.file, &record.filename, record.size_bytes).await? {
+            Some(blob) => place(&blob, &dir.join(&record.filename))?,
+            None => missing.push(record.name.clone()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(AppError::conflict(
+            "content_missing",
+            format!(
+                "{} {} to be downloaded by hand first. Open Mods & Plugins on the configuration to get {}.",
+                missing.join(", "),
+                if missing.len() == 1 { "has" } else { "have" },
+                if missing.len() == 1 { "it" } else { "them" }
+            ),
+        ));
     }
     let mut listing = tokio::fs::read_dir(&dir).await?;
     while let Some(entry) = listing.next_entry().await? {

@@ -283,7 +283,13 @@ function fileBody(file: File): FormData {
 export const uploadContent = (id: string, file: File): Promise<ContentIndex> =>
   live()
     ? request(content(id, '/upload'), { method: 'POST', body: fileBody(file) })
-    : local(() => demo.uploadContent(id, file.name, file.size));
+    : file.text().then((text) => local(() => demo.uploadContent(id, file.name, file.size, text)));
+
+/** The file for an entry Lodestone couldn't download (it checks the hash). */
+export const provideContentFile = (id: string, entry: string, file: File): Promise<ContentIndex> =>
+  live()
+    ? request(content(id, `/${entry}/file`), { method: 'POST', body: fileBody(file) })
+    : file.text().then((text) => local(() => demo.provideContentFile(id, entry, file.name, text)));
 
 /** Imports a `.mrpack` as a new configuration; the job's `targetId` is it. */
 export const importModpack = (file: File): Promise<Job> =>

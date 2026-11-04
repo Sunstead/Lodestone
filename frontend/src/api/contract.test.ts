@@ -244,4 +244,50 @@ describe.each(targets)('contract: $name', ({ mode, base }) => {
     index = await api.removeContent(profile.id, entry);
     expect(index.entries).toEqual([]);
   });
+
+  it('offers Hangar for Paper, and CurseForge once it has a key', async () => {
+    const paper = await api.createProfile(profileSpec(`Sources ${unique()}`));
+    const sources = (await api.getContent(paper.id)).providers;
+    expect(sources.map((p) => [p.id, p.available])).toEqual([
+      ['modrinth', true],
+      ['hangar', true],
+      ['curseforge', false],
+    ]);
+    expect(sources[2].reason).toContain('API key');
+    const fabric = await api.createProfile({ ...profileSpec(`Fabric ${unique()}`), softwareId: 'fabric' });
+    expect((await api.getContent(fabric.id)).providers.find((p) => p.id === 'hangar')?.available).toBe(false);
+
+    const hangar = await api.searchContent(paper.id, { q: 'guard', provider: 'hangar' });
+    expect(hangar.hits[0]).toMatchObject({ provider: 'hangar', name: 'WorldGuard' });
+    await expect(api.searchContent(paper.id, { q: 'x', provider: 'curseforge' })).rejects.toThrow(/API key/);
+
+    const settings = await api.updateSettings({ curseforgeApiKey: 'contract-key' });
+    expect(settings.curseforgeKeySet).toBe(true);
+    expect(JSON.stringify(settings)).not.toContain('contract-key');
+    expect((await api.getContent(paper.id)).providers.find((p) => p.id === 'curseforge')?.available).toBe(true);
+    expect((await api.updateSettings({ curseforgeApiKey: '' })).curseforgeKeySet).toBe(false);
+  });
+
+  it('records restricted files as manual downloads and checks the upload', async () => {
+    await api.updateSettings({ curseforgeApiKey: 'contract-key' });
+    try {
+      const profile = await api.createProfile(profileSpec(`Manual ${unique()}`));
+      const plan = await api.planContent(profile.id, { items: [{ provider: 'curseforge', projectId: 'fk-essentialsx' }] });
+      const item = plan.install[0];
+      expect(item.manualDownload).toEqual(expect.any(String));
+      let index = await api.applyContent(profile.id, [
+        { provider: item.provider, projectId: item.projectId, versionId: item.versionId },
+      ]);
+      const entry = index.entries[0];
+      expect(entry).toMatchObject({ provider: 'curseforge', manualDownload: expect.any(String) });
+
+      const wrong = new File(['not it'], 'EssentialsX.jar');
+      await expect(api.provideContentFile(profile.id, entry.id, wrong)).rejects.toThrow(/checksum/);
+      const right = new File([`lodestone fake content: ${item.versionId}\n`], 'EssentialsX.jar');
+      index = await api.provideContentFile(profile.id, entry.id, right);
+      expect(index.entries[0].manualDownload).toBeNull();
+    } finally {
+      await api.updateSettings({ curseforgeApiKey: '' });
+    }
+  });
 });

@@ -1,0 +1,55 @@
+[package]
+name = "lodestone"
+description = "Lodestone: run Minecraft servers as World + Profile + Instance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Real-container tests. Needs a Docker daemon and network access.
+docker-tests = []
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bollard.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+hex.workspace = true
+mc-rcon.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+zip.workspace = true
+fastnbt.workspace = true
+flate2.workspace = true
+url.workspace = true
+base64.workspace = true
+jsonwebtoken.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+sha2.workspace = true
+zip.workspace = true
+http-body-util.workspace = true
+wiremock.workspace = true
+tempfile.workspace = true

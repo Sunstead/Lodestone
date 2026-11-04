@@ -1,0 +1,7 @@
+**/node_modules
+backend/target
+frontend/dist
+e2e
+.lodestone-*
+.git
+.claude

@@ -1,0 +1,133 @@
+{
+  "$comment": "Offline mod/plugin catalog for the fake content providers (backend --providers fake: Modrinth, Hangar and CurseForge stand-ins) and the demo. Projects with restrictedOn must be downloaded by hand on those providers, like CurseForge files with distribution disabled. Names mirror real projects so the UI reads naturally, but there are no real files: each 'jar' is a few placeholder bytes. Versions are newest first.",
+  "projects": [
+    {
+      "id": "fk-worldedit", "slug": "worldedit", "name": "WorldEdit", "author": "EngineHub",
+      "description": "In-game map editor: selections, schematics, copy and paste, brushes.",
+      "categories": ["utility"], "downloads": 12260000,
+      "versions": [
+        { "id": "fk-worldedit-7.3.10", "versionNumber": "7.3.10", "channel": "release", "publishedAt": "2026-09-14T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["paper", "spigot", "bukkit", "fabric", "neoforge"], "dependencies": [] },
+        { "id": "fk-worldedit-7.3.9", "versionNumber": "7.3.9", "channel": "release", "publishedAt": "2026-05-02T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit", "fabric", "neoforge"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-worldguard", "slug": "worldguard", "name": "WorldGuard", "author": "EngineHub",
+      "description": "Protect regions of your world and control what players can do in them.",
+      "categories": ["management", "utility"], "downloads": 1046600,
+      "versions": [
+        { "id": "fk-worldguard-7.0.13", "versionNumber": "7.0.13", "channel": "release", "publishedAt": "2026-08-20T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [{ "projectId": "fk-worldedit", "versionId": null, "kind": "required" }] },
+        { "id": "fk-worldguard-7.0.12", "versionNumber": "7.0.12", "channel": "release", "publishedAt": "2026-02-11T10:00:00Z", "gameVersions": ["1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [{ "projectId": "fk-worldedit", "versionId": null, "kind": "required" }] }
+      ]
+    },
+    {
+      "id": "fk-luckperms", "slug": "luckperms", "name": "LuckPerms", "author": "Luck",
+      "description": "A permissions plugin: groups, inheritance, contexts and a web editor.",
+      "categories": ["management"], "downloads": 3420000,
+      "versions": [
+        { "id": "fk-luckperms-5.4.150", "versionNumber": "5.4.150", "channel": "release", "publishedAt": "2026-10-01T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit", "fabric", "neoforge", "forge"], "dependencies": [{ "projectId": "fk-vault", "versionId": null, "kind": "optional" }] }
+      ]
+    },
+    {
+      "id": "fk-vault", "slug": "vault", "name": "Vault", "author": "MilkBowl",
+      "description": "The economy, permissions and chat API other plugins build on.",
+      "categories": ["library", "economy"], "downloads": 2210000,
+      "versions": [
+        { "id": "fk-vault-1.7.3", "versionNumber": "1.7.3", "channel": "release", "publishedAt": "2025-11-30T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-essentialsx", "slug": "essentialsx", "name": "EssentialsX", "author": "EssentialsX Team", "restrictedOn": ["curseforge"],
+      "description": "Homes, warps, kits, teleports and the hundred other commands every server wants.",
+      "categories": ["utility", "management"], "downloads": 4980000,
+      "versions": [
+        { "id": "fk-essentialsx-2.21.0", "versionNumber": "2.21.0", "channel": "release", "publishedAt": "2026-07-04T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [{ "projectId": "fk-vault", "versionId": null, "kind": "optional" }] },
+        { "id": "fk-essentialsx-2.20.1", "versionNumber": "2.20.1", "channel": "release", "publishedAt": "2025-12-12T10:00:00Z", "gameVersions": ["1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [{ "projectId": "fk-vault", "versionId": null, "kind": "optional" }] }
+      ]
+    },
+    {
+      "id": "fk-homeslite", "slug": "homeslite", "name": "HomesLite", "author": "lodestone-test",
+      "description": "A tiny /home plugin. It clashes with EssentialsX, which has its own.",
+      "categories": ["utility"], "downloads": 18200,
+      "versions": [
+        { "id": "fk-homeslite-1.2.0", "versionNumber": "1.2.0", "channel": "release", "publishedAt": "2026-03-03T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [{ "projectId": "fk-essentialsx", "versionId": null, "kind": "incompatible" }] }
+      ]
+    },
+    {
+      "id": "fk-coreprotect", "slug": "coreprotect", "name": "CoreProtect", "author": "Intelli",
+      "description": "Block logging and rollback, to undo griefing.",
+      "categories": ["management", "utility"], "downloads": 1630000,
+      "versions": [
+        { "id": "fk-coreprotect-22.4", "versionNumber": "22.4", "channel": "release", "publishedAt": "2025-10-10T10:00:00Z", "gameVersions": ["1.21.1", "1.20.6"], "loaders": ["paper", "spigot", "bukkit"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-chunky", "slug": "chunky", "name": "Chunky", "author": "pop4959",
+      "description": "Pre-generates chunks quickly and safely, so exploring doesn't lag the server.",
+      "categories": ["utility", "optimization"], "downloads": 5340000,
+      "versions": [
+        { "id": "fk-chunky-1.4.28", "versionNumber": "1.4.28", "channel": "release", "publishedAt": "2026-09-01T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.6", "1.20.4"], "loaders": ["paper", "spigot", "bukkit", "fabric", "neoforge", "forge"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-spark", "slug": "spark", "name": "spark", "author": "lucko",
+      "description": "A performance profiler: find out what's using the CPU and why ticks are slow.",
+      "categories": ["utility", "optimization"], "downloads": 9870000,
+      "versions": [
+        { "id": "fk-spark-1.10.124", "versionNumber": "1.10.124", "channel": "release", "publishedAt": "2026-10-20T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["paper", "spigot", "bukkit", "fabric", "neoforge", "forge"], "dependencies": [] },
+        { "id": "fk-spark-1.10.119", "versionNumber": "1.10.119", "channel": "release", "publishedAt": "2026-04-18T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.6", "1.20.4"], "loaders": ["paper", "spigot", "bukkit", "fabric", "neoforge", "forge"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-fabric-api", "slug": "fabric-api", "name": "Fabric API", "author": "modmuss50",
+      "description": "Core library most Fabric mods need.",
+      "categories": ["library"], "downloads": 95000000,
+      "versions": [
+        { "id": "fk-fabric-api-0.119.2", "versionNumber": "0.119.2+1.21.4", "channel": "release", "publishedAt": "2026-08-30T10:00:00Z", "gameVersions": ["1.21.4"], "loaders": ["fabric"], "dependencies": [] },
+        { "id": "fk-fabric-api-0.116.1", "versionNumber": "0.116.1+1.21.1", "channel": "release", "publishedAt": "2026-06-30T10:00:00Z", "gameVersions": ["1.21.1"], "loaders": ["fabric"], "dependencies": [] },
+        { "id": "fk-fabric-api-0.97.3", "versionNumber": "0.97.3+1.20.4", "channel": "release", "publishedAt": "2025-04-30T10:00:00Z", "gameVersions": ["1.20.4"], "loaders": ["fabric"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-fabric-kotlin", "slug": "fabric-language-kotlin", "name": "Fabric Language Kotlin", "author": "FabricMC",
+      "description": "Lets Fabric mods written in Kotlin run.",
+      "categories": ["library"], "downloads": 41000000,
+      "versions": [
+        { "id": "fk-fabric-kotlin-1.13.1", "versionNumber": "1.13.1+kotlin.2.1.10", "channel": "release", "publishedAt": "2026-07-15T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1", "1.20.4"], "loaders": ["fabric"], "dependencies": [{ "projectId": "fk-fabric-api", "versionId": null, "kind": "required" }] }
+      ]
+    },
+    {
+      "id": "fk-ledger", "slug": "ledger", "name": "Ledger", "author": "QuiltServerTools",
+      "description": "Server-side block and inventory logging with rollbacks, for Fabric.",
+      "categories": ["management", "utility"], "downloads": 410000,
+      "versions": [
+        { "id": "fk-ledger-1.3.8", "versionNumber": "1.3.8", "channel": "release", "publishedAt": "2026-06-06T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["fabric"], "dependencies": [{ "projectId": "fk-fabric-api", "versionId": null, "kind": "required" }, { "projectId": "fk-fabric-kotlin", "versionId": null, "kind": "required" }] }
+      ]
+    },
+    {
+      "id": "fk-lithium", "slug": "lithium", "name": "Lithium", "author": "CaffeineMC",
+      "description": "Optimises game physics, mob AI and block ticking without changing behaviour.",
+      "categories": ["optimization"], "downloads": 48700000,
+      "versions": [
+        { "id": "fk-lithium-0.15.1", "versionNumber": "mc1.21.4-0.15.1", "channel": "release", "publishedAt": "2026-09-25T10:00:00Z", "gameVersions": ["1.21.4"], "loaders": ["fabric", "neoforge"], "dependencies": [] },
+        { "id": "fk-lithium-0.15.0", "versionNumber": "mc1.21.4-0.15.0", "channel": "release", "publishedAt": "2026-07-25T10:00:00Z", "gameVersions": ["1.21.4"], "loaders": ["fabric", "neoforge"], "dependencies": [] },
+        { "id": "fk-lithium-0.13.1", "versionNumber": "mc1.21.1-0.13.1", "channel": "release", "publishedAt": "2026-05-25T10:00:00Z", "gameVersions": ["1.21.1"], "loaders": ["fabric", "neoforge"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-ferritecore", "slug": "ferrite-core", "name": "FerriteCore", "author": "malte0811", "restrictedOn": ["curseforge"],
+      "description": "Cuts memory use, so more of the heap goes to the world.",
+      "categories": ["optimization"], "downloads": 38200000,
+      "versions": [
+        { "id": "fk-ferritecore-7.1.1", "versionNumber": "7.1.1", "channel": "release", "publishedAt": "2026-03-21T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["fabric", "neoforge", "forge"], "dependencies": [] }
+      ]
+    },
+    {
+      "id": "fk-krypton", "slug": "krypton", "name": "Krypton", "author": "astei",
+      "description": "Optimises the networking stack for servers with many players.",
+      "categories": ["optimization"], "downloads": 7600000,
+      "versions": [
+        { "id": "fk-krypton-0.2.8", "versionNumber": "0.2.8", "channel": "beta", "publishedAt": "2026-01-19T10:00:00Z", "gameVersions": ["1.21.4", "1.21.1"], "loaders": ["fabric"], "dependencies": [] }
+      ]
+    }
+  ]
+}

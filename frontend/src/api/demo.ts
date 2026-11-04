@@ -1,0 +1,2322 @@
+/**
+ * In-memory stand-in for the Rust backend.
+ *
+ * The client probes `/api/v1/health` once; while that fails (no backend
+ * running yet) every request lands here instead. When the Axum service
+ * comes up the same calls go over HTTP/SSE with no UI changes.
+ *
+ * Three stores mirror the three assets:
+ *
+ *   worlds     persistent regions + world-scoped gameplay policy
+ *   profiles   software, mods, resource limits, profile-scoped properties
+ *   instances  a profile bound to a world, running in a container
+ *
+ * The store is deliberately stateful: lifecycle actions move instances
+ * through starting/running/stopping, the console streams on a ticker and
+ * metrics drift so the dashboard reads like a live server.
+ */
+
+import type {
+  Backup,
+  BackupIndex,
+  BanEntry,
+  ConsoleLine,
+  ContentIndex,
+  ContentPlanRequest,
+  ContentRef,
+  ContentSearchResult,
+  ContentSource,
+  ContentVersion,
+  InstallPlan,
+  Job,
+  Me,
+  UpdateMeRequest,
+  UserInfo,
+  UserSummary,
+  CreateInstanceRequest,
+  CreateProfileRequest,
+  CreateWorldRequest,
+  Difficulty,
+  GameMode,
+  Instance,
+  InstanceStatus,
+  LevelType,
+  LogLevel,
+  Player,
+  Profile,
+  PropertyField,
+  PropertyScope,
+  ServerAction,
+  ServerPlayers,
+  ServerSoftwareId,
+  ServerState,
+  SoftwareCatalog,
+  World,
+  WorldStatus,
+  AppSettings,
+  SystemInfo,
+  UpdateInstanceRequest,
+  UpdateProfileRequest,
+  UpdateScheduleRequest,
+  UpdateSettingsRequest,
+  UpdateWorldRequest,
+} from './types';
+import schema from '../../../shared/server-properties.schema.json';
+import * as demoContent from './demo-content';
+
+/* ------------------------------------------------------------------ *
+ * helpers
+ * ------------------------------------------------------------------ */
+
+let seq = 0;
+const uid = (prefix: string) => `${prefix}-${(++seq).toString(36)}${Date.now().toString(36).slice(-4)}`;
+
+const rand = (min: number, max: number) => min + Math.random() * (max - min);
+const int = (min: number, max: number) => Math.floor(rand(min, max + 1));
+const pick = <T,>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)];
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const jitter = (value: number, amount: number, min: number, max: number) =>
+  clamp(value + rand(-amount, amount), min, max);
+
+const HOUR = 3600_000;
+const DAY = 24 * HOUR;
+const iso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
+
+const slugify = (value: string): string => {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 32);
+  return slug || 'world';
+};
+
+/** Java Mojang requires for a release (mirrors `software::java_for_minecraft`). */
+const javaFor = (version: string): number => {
+  const [, minor = 0, patch = 0] = version.split('.').map(Number);
+  if (minor >= 21 || (minor === 20 && patch >= 5)) return 21;
+  if (minor >= 18) return 17;
+  if (minor === 17) return 16;
+  return 8;
+};
+
+const imageFor = (version: string): string => `eclipse-temurin:${javaFor(version)}-jre`;
+
+const SOFTWARE_LABEL: Record<ServerSoftwareId, string> = {
+  vanilla: 'Vanilla',
+  paper: 'Paper',
+  fabric: 'Fabric',
+  forge: 'Forge',
+  neoforge: 'NeoForge',
+};
+
+/* ------------------------------------------------------------------ *
+ * server.properties — one table, scoped by owner
+ *
+ * A key belongs to exactly one asset. `level-name` is the world's
+ * folder, so it is never typed by hand; `server-port` is published by a
+ * container, so it is instance-scoped.
+ * ------------------------------------------------------------------ */
+
+type FieldDef = Omit<PropertyField, 'value'>;
+
+/** Field metadata lives in `shared/server-properties.schema.json`, shared with the Rust backend. */
+export const PROPERTY_DEFS: FieldDef[] = schema.fields as FieldDef[];
+
+export const TYPE_GROUPS = schema.groups as Record<PropertyScope, { id: string; label: string; hint: string }[]>;
+
+const GROUP_LABEL = new Map<string, string>(
+  Object.values(TYPE_GROUPS)
+    .flat()
+    .map((group) => [group.id, group.label]),
+);
+
+export const propertyGroupLabel = (group: string): string => GROUP_LABEL.get(group) ?? group;
+
+function buildFields(overrides: Record<string, string> = {}): PropertyField[] {
+  return PROPERTY_DEFS.map((def) => ({ ...def, value: overrides[def.key] ?? def.defaultValue }));
+}
+
+export function splitFields(fields: PropertyField[], scope: PropertyScope): PropertyField[] {
+  return fields.filter((field) => field.scope === scope);
+}
+
+/* ------------------------------------------------------------------ *
+ * content pools
+ * ------------------------------------------------------------------ */
+
+const SURVIVAL_ONLINE = [
+  { name: 'Steve_Builds', ping: 24, playtime: 8040, dimension: 'overworld' as const, op: true },
+  { name: 'CreeperSlayer', ping: 41, playtime: 6720, dimension: 'nether' as const, op: false },
+  { name: 'redstone_rae', ping: 18, playtime: 3900, dimension: 'overworld' as const, op: false },
+  { name: 'Alexandrite', ping: 77, playtime: 2880, dimension: 'end' as const, op: false },
+  { name: 'mossy_cobble', ping: 33, playtime: 1860, dimension: 'overworld' as const, op: false },
+  { name: 'DiamondDan', ping: 112, playtime: 720, dimension: 'overworld' as const, op: false },
+  { name: 'pixelpilot', ping: 29, playtime: 240, dimension: 'nether' as const, op: false },
+];
+
+const SURVIVAL_OFFLINE = [
+  { name: 'quarry_quinn', lastSeen: Date.now() - 2 * DAY, playtime: 411_000 },
+  { name: 'birch_and_beans', lastSeen: Date.now() - 5 * HOUR, playtime: 88_200 },
+  { name: 'tnt_lily', lastSeen: Date.now() - 26 * HOUR, playtime: 154_000, op: true },
+  { name: 'cartographer_kay', lastSeen: Date.now() - 4 * DAY, playtime: 61_000 },
+  { name: 'wither_sarah', lastSeen: Date.now() - 9 * DAY, playtime: 203_000 },
+];
+
+const MODDED_ONLINE = [
+  { name: 'gearshift_gwen', ping: 46, playtime: 5400, dimension: 'overworld' as const, op: true },
+  { name: 'copper_cowboy', ping: 61, playtime: 3120, dimension: 'nether' as const, op: false },
+  { name: 'tinker_tom', ping: 38, playtime: 1200, dimension: 'overworld' as const, op: false },
+];
+
+const MODDED_OFFLINE = [
+  { name: 'brass_bandit', lastSeen: Date.now() - 3 * HOUR, playtime: 40_500 },
+  { name: 'cogwheel_carl', lastSeen: Date.now() - 3 * DAY, playtime: 122_000 },
+];
+
+const CREATIVE_OFFLINE = [
+  { name: 'pixel_pete', lastSeen: Date.now() - 6 * HOUR, playtime: 7400 },
+  { name: 'buildmaster_bob', lastSeen: Date.now() - 3 * DAY, playtime: 31_000 },
+  { name: 'luma_builds', lastSeen: Date.now() - 11 * HOUR, playtime: 9600 },
+  { name: 'grid_gremlin', lastSeen: Date.now() - 8 * DAY, playtime: 22_000 },
+];
+
+const ADVANCEMENTS = [
+  'Diamonds!',
+  'A Terrible Fortress',
+  'Free the End',
+  'Two by Two',
+  'A Balanced Diet',
+  'Cover Me in Debris',
+  'Bees in a Bucket? No, Bees in a Bucket',
+];
+
+const DEATHS = [
+  '{name} was blown up by Creeper',
+  '{name} fell from a high place',
+  '{name} tried to swim in lava',
+  '{name} was shot by a Skeleton',
+  '{name} fell out of the water',
+  '{name} was killed by Enderman',
+];
+
+const AMBIENT_LINES = [
+  'Saving the game (this may take a moment!)',
+  'Saved the game',
+  'ThreadedAnvilChunkStorage (world): All chunks are saved',
+  'Preparing start region for dimension [minecraft:overworld]',
+  'Preparing spawn area: 47%',
+  'Time elapsed: 1024 ms',
+  '[Server thread/WARN]: Can\'t keep up! Is the server overloaded? Running 2312ms behind, skipping 46 ticks',
+  '[Server thread/DEBUG]: Failed to load chunk at [-312, 88]: region file r.-10.2.mca is truncated',
+];
+
+function playerLine(kind: 'join' | 'quit', name: string): string {
+  return kind === 'join' ? `${name} joined the game` : `${name} left the game`;
+}
+
+/* ------------------------------------------------------------------ *
+ * stores
+ * ------------------------------------------------------------------ */
+
+/**
+ * An instance bundles its own runtime. Everything about the world and
+ * profile it uses is looked up by id, so deleting the instance never
+ * touches either asset.
+ */
+interface DemoInstance {
+  instance: Instance;
+  status: InstanceStatus;
+  players: ServerPlayers;
+  console: ConsoleLine[];
+  listeners: Set<(line: ConsoleLine) => void>;
+  ticker: ReturnType<typeof setInterval> | null;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface DemoProfile {
+  profile: Profile;
+  properties: PropertyField[];
+}
+
+interface DemoWorld {
+  world: World;
+  status: WorldStatus;
+  backups: BackupIndex;
+  /** World-scoped property values, kept beside the world asset. */
+  properties: Record<string, string>;
+}
+
+const instances = new Map<string, DemoInstance>();
+const profiles = new Map<string, DemoProfile>();
+const worlds = new Map<string, DemoWorld>();
+
+const uniqueId = (base: string, taken: (id: string) => boolean): string => {
+  let id = slugify(base);
+  let suffix = 2;
+  while (taken(id)) id = `${slugify(base)}-${suffix++}`;
+  return id;
+};
+
+/* ------------------------------------------------------------------ *
+ * builders
+ * ------------------------------------------------------------------ */
+
+function makePlayers(
+  online: { name: string; ping: number; playtime: number; dimension: Player['dimension']; op?: boolean }[],
+  offline: { name: string; lastSeen: number; playtime: number; op?: boolean }[],
+  whitelisted: string[],
+): ServerPlayers {
+  const uuid = (name: string) =>
+    [...name].reduce((hash, char) => hash * 31 + char.charCodeAt(0), 7).toString(16).padStart(8, '0') +
+    '-0000-4000-8000-' +
+    [...name].reduce((hash, char) => hash * 33 + char.charCodeAt(0), 11).toString(16).padStart(12, '0');
+
+  const players: Player[] = [
+    ...online.map((entry) => ({
+      uuid: uuid(entry.name),
+      name: entry.name,
+      online: true,
+      pingMs: entry.ping,
+      playtimeSeconds: entry.playtime,
+      dimension: entry.dimension,
+      op: entry.op ?? false,
+      whitelisted: whitelisted.includes(entry.name),
+      firstSeen: iso(-120 * DAY),
+      lastSeen: iso(),
+    })),
+    ...offline.map((entry) => ({
+      uuid: uuid(entry.name),
+      name: entry.name,
+      online: false,
+      pingMs: null,
+      playtimeSeconds: entry.playtime,
+      dimension: null,
+      op: entry.op ?? false,
+      whitelisted: whitelisted.includes(entry.name),
+      firstSeen: iso(-200 * DAY),
+      lastSeen: iso(-Date.now() + entry.lastSeen),
+    })),
+  ];
+
+  return { players, whitelistEnabled: whitelisted.length > 0, whitelistEnforced: false, bans: [] };
+}
+
+function makeStatus(partial: Partial<InstanceStatus> & { state: ServerState }): InstanceStatus {
+  return {
+    startedAt: null,
+    uptimeSeconds: null,
+    players: { online: 0, max: 20 },
+    memory: { usedBytes: 0, limitBytes: 8 * 1024 ** 3 },
+    cpuPercent: 0,
+    tps: 0,
+    tickMs: 0,
+    disk: { usedBytes: 41.6 * 1024 ** 3, totalBytes: 80 * 1024 ** 3 },
+    network: { rxPerSec: 0, txPerSec: 0, rxTotal: 9.4 * 1024 ** 3, txTotal: 38.1 * 1024 ** 3, dropped: 0.02 },
+    host: {
+      cpuPercent: 21,
+      cpuCores: 4,
+      diskUsedBytes: 41.6 * 1024 ** 3,
+      diskTotalBytes: 80 * 1024 ** 3,
+      swapUsedBytes: 0.2 * 1024 ** 3,
+      swapTotalBytes: 2 * 1024 ** 3,
+    },
+    container: { id: '—', name: '—', image: '—', healthy: false },
+    ...partial,
+  };
+}
+
+function backup(
+  name: string,
+  worldId: string,
+  kind: Backup['kind'],
+  ageMs: number,
+  sizeGb: number,
+  status: Backup['status'] = 'complete',
+  instanceId: string | null = null,
+): Backup {
+  return {
+    id: uid('bk'),
+    worldId,
+    name,
+    kind,
+    createdAt: iso(-ageMs),
+    sizeBytes: Math.round(sizeGb * 1024 ** 3),
+    status,
+    instanceId,
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * seed data — worlds
+ * ------------------------------------------------------------------ */
+
+interface WorldSeed {
+  id: string;
+  name: string;
+  folder: string;
+  levelType: LevelType;
+  seed: string | null;
+  generateStructures: boolean;
+  generated: boolean;
+  maxWorldSize: number;
+  allowNether: boolean;
+  difficulty: Difficulty;
+  gamemode: GameMode;
+  hardcore: boolean;
+  spawnProtection: number;
+  spawnMonsters: boolean;
+  spawnNpcs: boolean;
+  pvp: boolean;
+  allowFlight: boolean;
+  enableCommandBlock: boolean;
+  dataPacks: { enabled: string[]; disabled: string[] };
+  sizeBytes: number;
+  createdAt: string;
+  updatedAt: string;
+  status: {
+    chunks: number;
+    entities: number;
+    blockEntities: number;
+    day: number;
+    timeOfDay: string;
+    playerCount: number;
+    lastPlayedAt: string | null;
+  };
+  backups: BackupIndex;
+}
+
+const WORLD_SEEDS: WorldSeed[] = [
+  {
+    id: 'survival-season-2',
+    name: 'Survival Season 2',
+    folder: 'world',
+    levelType: 'minecraft:normal',
+    seed: '4839201772',
+    generateStructures: true,
+    generated: true,
+    maxWorldSize: 29999984,
+    allowNether: true,
+    difficulty: 'hard',
+    gamemode: 'survival',
+    hardcore: false,
+    spawnProtection: 16,
+    spawnMonsters: true,
+    spawnNpcs: true,
+    pvp: true,
+    allowFlight: false,
+    enableCommandBlock: true,
+    dataPacks: { enabled: ['vanilla'], disabled: [] },
+    sizeBytes: 6.3 * 1024 ** 3,
+    createdAt: iso(-63 * DAY),
+    updatedAt: iso(-20 * 60_000),
+    status: {
+      chunks: 1248,
+      entities: 3917,
+      blockEntities: 642,
+      day: 412,
+      timeOfDay: '14:20',
+      playerCount: 12,
+      lastPlayedAt: iso(-4 * 60_000),
+    },
+    backups: {
+      backups: [
+        backup('Scheduled', 'survival-season-2', 'scheduled', 42 * 60_000, 1.82, 'running', 'survival-1'),
+        backup('Scheduled', 'survival-season-2', 'scheduled', 6 * HOUR, 1.81, 'complete', 'survival-1'),
+        backup('Manual', 'survival-season-2', 'manual', 17 * HOUR, 1.79, 'complete', 'survival-1'),
+        backup('Scheduled', 'survival-season-2', 'scheduled', 20 * HOUR, 1.78, 'complete', 'survival-1'),
+        backup('Scheduled', 'survival-season-2', 'scheduled', 30 * HOUR, 1.77, 'complete', 'survival-1'),
+        backup('Before Paper 1.21.4', 'survival-season-2', 'manual', 3 * DAY, 1.71, 'complete', 'survival-1'),
+        backup('Scheduled', 'survival-season-2', 'scheduled', 3 * DAY + 6 * HOUR, 1.7, 'complete', 'survival-1'),
+        backup('Scheduled', 'survival-season-2', 'scheduled', 4 * DAY, 1.68, 'complete', 'survival-1'),
+      ],
+      schedule: {
+        enabled: true,
+        intervalMinutes: 360,
+        retention: 28,
+        lastRunAt: iso(-6 * HOUR),
+        nextRunAt: iso(0),
+      },
+      storage: {
+        path: '/var/lib/lodestone/backups/survival-season-2',
+        usedBytes: 12.9 * 1024 ** 3,
+        quotaBytes: 50 * 1024 ** 3,
+      },
+    },
+  },
+  {
+    id: 'flat-test',
+    name: 'Flat Test',
+    folder: 'flat_test',
+    levelType: 'minecraft:flat',
+    seed: null,
+    generateStructures: false,
+    generated: true,
+    maxWorldSize: 29999984,
+    allowNether: false,
+    difficulty: 'peaceful',
+    gamemode: 'creative',
+    hardcore: false,
+    spawnProtection: 0,
+    spawnMonsters: false,
+    spawnNpcs: false,
+    pvp: false,
+    allowFlight: true,
+    enableCommandBlock: true,
+    dataPacks: { enabled: ['vanilla'], disabled: [] },
+    sizeBytes: 120 * 1024 ** 2,
+    createdAt: iso(-41 * DAY),
+    updatedAt: iso(-2 * DAY),
+    status: {
+      chunks: 289,
+      entities: 84,
+      blockEntities: 1203,
+      day: 58,
+      timeOfDay: '06:00',
+      playerCount: 4,
+      lastPlayedAt: iso(-2 * DAY),
+    },
+    backups: {
+      backups: [
+        backup('Manual', 'flat-test', 'manual', 2 * DAY, 0.42, 'complete', 'creative-1'),
+        backup('Scheduled', 'flat-test', 'scheduled', 3 * DAY, 0.41, 'complete', 'creative-1'),
+        backup('Scheduled', 'flat-test', 'scheduled', 4 * DAY, 0.4, 'complete', 'creative-1'),
+      ],
+      schedule: {
+        enabled: false,
+        intervalMinutes: 1440,
+        retention: 10,
+        lastRunAt: iso(-3 * DAY),
+        nextRunAt: null,
+      },
+      storage: {
+        path: '/var/lib/lodestone/backups/flat-test',
+        usedBytes: 2.1 * 1024 ** 3,
+        quotaBytes: 50 * 1024 ** 3,
+      },
+    },
+  },
+  {
+    id: 'create-world',
+    name: 'Create World',
+    folder: 'create_world',
+    levelType: 'minecraft:normal',
+    seed: '9912043587',
+    generateStructures: true,
+    generated: true,
+    maxWorldSize: 29999984,
+    allowNether: true,
+    difficulty: 'normal',
+    gamemode: 'survival',
+    hardcore: false,
+    spawnProtection: 0,
+    spawnMonsters: true,
+    spawnNpcs: true,
+    pvp: true,
+    allowFlight: true,
+    enableCommandBlock: true,
+    dataPacks: { enabled: ['vanilla'], disabled: [] },
+    sizeBytes: 2.1 * 1024 ** 3,
+    createdAt: iso(-19 * DAY),
+    updatedAt: iso(-30 * 60_000),
+    status: {
+      chunks: 2140,
+      entities: 6402,
+      blockEntities: 1877,
+      day: 96,
+      timeOfDay: '21:45',
+      playerCount: 5,
+      lastPlayedAt: iso(-12 * 60_000),
+    },
+    backups: {
+      backups: [
+        backup('Scheduled', 'create-world', 'scheduled', 3 * HOUR, 3.4, 'complete', 'modded-1'),
+        backup('Scheduled', 'create-world', 'scheduled', 9 * HOUR, 3.38, 'complete', 'modded-1'),
+        backup('Manual', 'create-world', 'manual', 22 * HOUR, 3.31, 'complete', 'modded-1'),
+        backup('Scheduled', 'create-world', 'scheduled', 27 * HOUR, 3.3, 'complete', 'modded-1'),
+        backup('Before Create 6.0', 'create-world', 'manual', 2 * DAY, 2.9, 'failed', 'modded-1'),
+      ],
+      schedule: {
+        enabled: true,
+        intervalMinutes: 720,
+        retention: 14,
+        lastRunAt: iso(-3 * HOUR),
+        nextRunAt: iso(6 * HOUR),
+      },
+      storage: {
+        path: '/var/lib/lodestone/backups/create-world',
+        usedBytes: 6.4 * 1024 ** 3,
+        quotaBytes: 50 * 1024 ** 3,
+      },
+    },
+  },
+  {
+    // Deliberately detached: proves a world outlives every container
+    // that ran it, and exercises the "free" badge in the sidebar.
+    id: 'archived-nether-test',
+    name: 'Archived Nether Test',
+    folder: 'nether_test',
+    levelType: 'minecraft:normal',
+    seed: '1122334455',
+    generateStructures: true,
+    generated: true,
+    maxWorldSize: 29999984,
+    allowNether: true,
+    difficulty: 'easy',
+    gamemode: 'survival',
+    hardcore: false,
+    spawnProtection: 0,
+    spawnMonsters: true,
+    spawnNpcs: true,
+    pvp: true,
+    allowFlight: false,
+    enableCommandBlock: true,
+    dataPacks: { enabled: ['vanilla'], disabled: [] },
+    sizeBytes: 1.4 * 1024 ** 3,
+    createdAt: iso(-120 * DAY),
+    updatedAt: iso(-88 * DAY),
+    status: {
+      chunks: 0,
+      entities: 0,
+      blockEntities: 0,
+      day: 233,
+      timeOfDay: '—',
+      playerCount: 3,
+      lastPlayedAt: iso(-88 * DAY),
+    },
+    backups: {
+      backups: [backup('Final archive', 'archived-nether-test', 'manual', 88 * DAY, 1.38)],
+      schedule: {
+        enabled: false,
+        intervalMinutes: 1440,
+        retention: 5,
+        lastRunAt: iso(-88 * DAY),
+        nextRunAt: null,
+      },
+      storage: {
+        path: '/var/lib/lodestone/backups/archived-nether-test',
+        usedBytes: 1.38 * 1024 ** 3,
+        quotaBytes: 50 * 1024 ** 3,
+      },
+    },
+  },
+];
+
+/* ------------------------------------------------------------------ *
+ * seed data — profiles
+ * ------------------------------------------------------------------ */
+
+interface ProfileSeed {
+  id: string;
+  name: string;
+  description: string;
+  softwareId: ServerSoftwareId;
+  version: string;
+  memory: { minMb: number; maxMb: number; initialMb: number };
+  cpuCores: number | null;
+  javaArgs: string;
+  autoStart: boolean;
+  restartOnCrash: boolean;
+  crashThreshold: number;
+  ports: { rcon: number; query: number | null };
+  createdAt: string;
+  updatedAt: string;
+  properties: Record<string, string>;
+  /** Installed content: exact versions from shared/fake-content.json. */
+  content?: { versions: string[]; disabled?: string[] };
+}
+
+const PROFILE_SEEDS: ProfileSeed[] = [
+  {
+    id: 'paper-1-21-4-performance',
+    name: 'Paper 1.21.4 · Performance',
+    description: 'Whitelist SMP tuning. View distance 10, G1GC with a 200 ms pause target, daily RCON access.',
+    softwareId: 'paper',
+    version: '1.21.4',
+    memory: { minMb: 2048, maxMb: 8192, initialMb: 4096 },
+    cpuCores: 4,
+    javaArgs: '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC',
+    autoStart: true,
+    restartOnCrash: true,
+    crashThreshold: 3,
+    ports: { rcon: 25575, query: null },
+    createdAt: iso(-63 * DAY),
+    updatedAt: iso(-6 * HOUR),
+    properties: {
+      motd: '§aSunstead §7Survival §8| §fwhitelist on',
+      'max-players': '20',
+      'white-list': 'true',
+      'enforce-whitelist': 'true',
+      'view-distance': '10',
+      'simulation-distance': '8',
+      'rcon.port': '25575',
+      'rcon.password': '7f3c1a9d5e2b4860',
+      'entity-broadcast-range-percentage': '100',
+    },
+    content: {
+      versions: ['fk-worldedit-7.3.9', 'fk-worldguard-7.0.13', 'fk-luckperms-5.4.150', 'fk-vault-1.7.3', 'fk-essentialsx-2.21.0', 'fk-spark-1.10.119', 'fk-chunky-1.4.28'],
+      disabled: ['fk-chunky'],
+    },
+  },
+  {
+    id: 'paper-1-21-4-baseline',
+    name: 'Paper 1.21.4 · Baseline',
+    description: 'Duplicate of the performance profile with no plugins installed. Reusable for test instances.',
+    softwareId: 'paper',
+    version: '1.21.4',
+    memory: { minMb: 1024, maxMb: 4096, initialMb: 2048 },
+    cpuCores: 2,
+    javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=200',
+    autoStart: false,
+    restartOnCrash: true,
+    crashThreshold: 3,
+    ports: { rcon: 25585, query: null },
+    createdAt: iso(-12 * DAY),
+    updatedAt: iso(-12 * DAY),
+    properties: {
+      motd: '§7Lodestone §8| §fbaseline',
+      'max-players': '20',
+      'view-distance': '8',
+      'simulation-distance': '6',
+      'rcon.port': '25585',
+      'rcon.password': 'a2f70c19d4e83b61',
+      'white-list': 'false',
+    },
+  },
+  {
+    id: 'vanilla-1-21-4',
+    name: 'Vanilla 1.21.4',
+    description: 'Unmodified server software. No plugins, no mods — used for build and test worlds.',
+    softwareId: 'vanilla',
+    version: '1.21.4',
+    memory: { minMb: 1024, maxMb: 4096, initialMb: 2048 },
+    cpuCores: null,
+    javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=150',
+    autoStart: false,
+    restartOnCrash: true,
+    crashThreshold: 5,
+    ports: { rcon: 25576, query: null },
+    createdAt: iso(-41 * DAY),
+    updatedAt: iso(-2 * DAY),
+    properties: {
+      motd: '§bCreative §7| §fflat build world',
+      'max-players': '10',
+      'view-distance': '12',
+      'simulation-distance': '10',
+      'rcon.port': '25576',
+      'rcon.password': 'c1e9af204b7d3351',
+      'player-idle-timeout': '30',
+    },
+  },
+  {
+    id: 'fabric-1-21-1-create',
+    name: 'Fabric 1.21.1 · Create',
+    description: 'Create + exploration pack. Lower view distance, 12 GB heap, broad entity broadcast range.',
+    softwareId: 'fabric',
+    version: '1.21.1',
+    memory: { minMb: 4096, maxMb: 12288, initialMb: 8192 },
+    cpuCores: 4,
+    javaArgs: '-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20',
+    autoStart: true,
+    restartOnCrash: true,
+    crashThreshold: 2,
+    ports: { rcon: 25577, query: null },
+    createdAt: iso(-19 * DAY),
+    updatedAt: iso(-4 * HOUR),
+    properties: {
+      motd: '§6Modded §7| §fCreate + Sodium',
+      'max-players': '16',
+      'view-distance': '8',
+      'simulation-distance': '6',
+      'rcon.port': '25577',
+      'rcon.password': 'b64d0e17ca9f2853',
+      'network-compression-threshold': '512',
+      'entity-broadcast-range-percentage': '80',
+    },
+    content: {
+      versions: ['fk-fabric-api-0.116.1', 'fk-lithium-0.13.1', 'fk-ferritecore-7.1.1', 'fk-krypton-0.2.8', 'fk-ledger-1.3.8', 'fk-fabric-kotlin-1.13.1'],
+    },
+  },
+];
+
+/* ------------------------------------------------------------------ *
+ * seed data — instances
+ * ------------------------------------------------------------------ */
+
+interface InstanceSeed {
+  id: string;
+  name: string;
+  profileId: string;
+  worldId: string;
+  state: ServerState;
+  ports: { minecraft: number; rcon: number; query: number | null };
+  environment: Record<string, string>;
+  createdAt: string;
+  status: Partial<InstanceStatus> & { state: ServerState };
+  players: ServerPlayers;
+  consoleHistory?: { level: LogLevel; message: string; gap?: [number, number] }[];
+}
+
+const INSTANCE_SEEDS: InstanceSeed[] = [
+  {
+    id: 'survival-1',
+    name: 'survival-1',
+    profileId: 'paper-1-21-4-performance',
+    worldId: 'survival-season-2',
+    state: 'running',
+    ports: { minecraft: 25565, rcon: 25575, query: null },
+    environment: { TZ: 'Europe/Berlin', EULA: 'TRUE', PAPER_VELOCITY: 'true' },
+    createdAt: iso(-63 * DAY),
+    status: {
+      state: 'running',
+      startedAt: iso(-(3 * DAY + 14 * HOUR + 22 * 60_000)),
+      uptimeSeconds: 3 * 86400 + 14 * 3600 + 22 * 60,
+      players: { online: 7, max: 20 },
+      memory: { usedBytes: 5.2 * 1024 ** 3, limitBytes: 8 * 1024 ** 3 },
+      cpuPercent: 38,
+      tps: 19.97,
+      tickMs: 31,
+      network: { rxPerSec: 84 * 1024, txPerSec: 312 * 1024, rxTotal: 9.4 * 1024 ** 3, txTotal: 38.1 * 1024 ** 3, dropped: 0.02 },
+      host: {
+        cpuPercent: 38,
+        cpuCores: 4,
+        diskUsedBytes: 41.6 * 1024 ** 3,
+        diskTotalBytes: 80 * 1024 ** 3,
+        swapUsedBytes: 0.2 * 1024 ** 3,
+        swapTotalBytes: 2 * 1024 ** 3,
+      },
+      container: { id: '8f2c41d09ab7', name: 'lodestone-survival-1', image: 'eclipse-temurin:21-jre', healthy: true },
+    },
+    players: makePlayers(
+      SURVIVAL_ONLINE,
+      SURVIVAL_OFFLINE,
+      SURVIVAL_ONLINE.map((p) => p.name).concat(['quarry_quinn', 'tnt_lily']),
+    ),
+    consoleHistory: [
+      { level: 'INFO', message: '[Lodestone] Container lodestone-survival-1 started', gap: [400_000, 400_000] },
+      { level: 'INFO', message: 'Starting minecraft server version 1.21.4' },
+      { level: 'INFO', message: 'Loading properties' },
+      { level: 'INFO', message: 'Preparing level "world"' },
+      { level: 'INFO', message: 'Preparing spawn area: 34%' },
+      { level: 'INFO', message: 'Preparing spawn area: 100%' },
+      { level: 'INFO', message: 'Done (4.812s)! For help, type "help"' },
+      { level: 'INFO', message: 'Steve_Builds joined the game', gap: [90_000, 140_000] },
+      { level: 'INFO', message: 'redstone_rae issued server command: /home base' },
+      { level: 'INFO', message: 'CreeperSlayer joined the game' },
+      { level: 'INFO', message: 'Alexandrite has made the advancement [Diamonds!]' },
+      { level: 'INFO', message: 'Saving the game (this may take a moment!)' },
+      { level: 'INFO', message: 'Saved the game' },
+      { level: 'INFO', message: 'mossy_cobble joined the game' },
+      { level: 'WARN', message: "Can't keep up! Is the server overloaded? Running 2312ms behind, skipping 46 ticks" },
+      { level: 'INFO', message: 'pixelpilot joined the game' },
+      { level: 'INFO', message: 'DiamondDan was blown up by Creeper' },
+      { level: 'INFO', message: 'Steve_Builds issued server command: /time set day' },
+      { level: 'ERROR', message: 'Failed to load chunk at [-312, 88]: region file r.-10.2.mca is truncated' },
+      { level: 'INFO', message: 'ThreadedAnvilChunkStorage (world): All chunks are saved' },
+      { level: 'INFO', message: 'Alexandrite has made the advancement [Free the End]' },
+      { level: 'DEBUG', message: 'Preparing spawn area: 84%' },
+      { level: 'INFO', message: 'CreeperSlayer issued server command: /tp redstone_rae' },
+      { level: 'INFO', message: 'pixelpilot left the game' },
+      { level: 'INFO', message: 'pixelpilot joined the game' },
+    ],
+  },
+  {
+    id: 'creative-1',
+    name: 'creative-1',
+    profileId: 'vanilla-1-21-4',
+    worldId: 'flat-test',
+    state: 'stopped',
+    ports: { minecraft: 25566, rcon: 25576, query: null },
+    environment: { TZ: 'Europe/Berlin', EULA: 'TRUE' },
+    createdAt: iso(-41 * DAY),
+    status: makeStatus({
+      state: 'stopped',
+      players: { online: 0, max: 10 },
+      memory: { usedBytes: 0, limitBytes: 4 * 1024 ** 3 },
+      container: { id: '—', name: 'lodestone-creative-1', image: 'eclipse-temurin:21-jre', healthy: false },
+    }),
+    players: makePlayers([], CREATIVE_OFFLINE, ['pixel_pete', 'buildmaster_bob', 'luma_builds']),
+    consoleHistory: [
+      { level: 'INFO', message: 'Steve_Builds issued server command: /time set day' },
+      { level: 'INFO', message: 'luma_builds joined the game' },
+      { level: 'INFO', message: 'grid_gremlin left the game' },
+      { level: 'INFO', message: 'Stopping the server', gap: [300_000, 300_000] },
+      { level: 'INFO', message: 'Saving players' },
+      { level: 'INFO', message: 'Saving worlds' },
+      { level: 'INFO', message: '[Lodestone] Container stopped, world unmounted from flat_test' },
+    ],
+  },
+  {
+    id: 'modded-1',
+    name: 'modded-1',
+    profileId: 'fabric-1-21-1-create',
+    worldId: 'create-world',
+    state: 'running',
+    ports: { minecraft: 25567, rcon: 25577, query: null },
+    environment: { TZ: 'Europe/Berlin', EULA: 'TRUE', FABRIC_LOADER: '0.16.10' },
+    createdAt: iso(-19 * DAY),
+    status: {
+      state: 'running',
+      startedAt: iso(-6 * HOUR - 12 * 60_000),
+      uptimeSeconds: 6 * 3600 + 12 * 60,
+      players: { online: 3, max: 16 },
+      memory: { usedBytes: 10.1 * 1024 ** 3, limitBytes: 12 * 1024 ** 3 },
+      cpuPercent: 62,
+      tps: 19.42,
+      tickMs: 44,
+      network: { rxPerSec: 46 * 1024, txPerSec: 198 * 1024, rxTotal: 3.1 * 1024 ** 3, txTotal: 11.6 * 1024 ** 3, dropped: 0.05 },
+      host: {
+        cpuPercent: 62,
+        cpuCores: 4,
+        diskUsedBytes: 41.6 * 1024 ** 3,
+        diskTotalBytes: 80 * 1024 ** 3,
+        swapUsedBytes: 0.2 * 1024 ** 3,
+        swapTotalBytes: 2 * 1024 ** 3,
+      },
+      container: { id: 'c09ba31f7742', name: 'lodestone-modded-1', image: 'eclipse-temurin:21-jre', healthy: true },
+    },
+    players: makePlayers(MODDED_ONLINE, MODDED_OFFLINE, MODDED_ONLINE.map((p) => p.name).concat(['brass_bandit'])),
+    consoleHistory: [
+      { level: 'INFO', message: '[Lodestone] Container lodestone-modded-1 started', gap: [400_000, 400_000] },
+      { level: 'INFO', message: 'Loading 8 mods:' },
+      { level: 'INFO', message: '\t- fabric-api 0.115.0+1.21.1' },
+      { level: 'INFO', message: '\t- sodium 0.6.13' },
+      { level: 'INFO', message: '\t- lithium 0.14.8' },
+      { level: 'INFO', message: '\t- create 6.0.4' },
+      { level: 'INFO', message: 'Done (11.284s)! For help, type "help"' },
+      { level: 'INFO', message: 'gearshift_gwen joined the game', gap: [120_000, 180_000] },
+      { level: 'INFO', message: 'copper_cowboy joined the game' },
+      { level: 'INFO', message: 'tinker_tom issued server command: /create versions' },
+      { level: 'WARN', message: "Can't keep up! Is the server overloaded? Running 1184ms behind, skipping 23 ticks" },
+      { level: 'INFO', message: 'gearshift_gwen has made the advancement [Ice and Repair]' },
+      { level: 'INFO', message: 'Saving the game (this may take a moment!)' },
+      { level: 'INFO', message: 'Saved the game' },
+      { level: 'ERROR', message: 'Create contraption at [104, 71, -338] failed to load: missing block state train_signal' },
+      { level: 'INFO', message: 'copper_cowboy was pulled into a Create train' },
+      { level: 'DEBUG', message: 'Ticking block entity: create:mechanical_pump at [112, 64, -320]' },
+      { level: 'INFO', message: 'tinker_tom joined the game' },
+    ],
+  },
+  {
+    // Reuses the baseline profile against the detached world, proving a
+    // profile can serve several instances and a world can be re-attached.
+    id: 'nether-test-1',
+    name: 'nether-test-1',
+    profileId: 'paper-1-21-4-baseline',
+    worldId: 'archived-nether-test',
+    state: 'stopped',
+    ports: { minecraft: 25568, rcon: 25585, query: null },
+    environment: { TZ: 'Europe/Berlin', EULA: 'TRUE' },
+    createdAt: iso(-88 * DAY),
+    status: makeStatus({
+      state: 'stopped',
+      players: { online: 0, max: 20 },
+      memory: { usedBytes: 0, limitBytes: 4 * 1024 ** 3 },
+      container: { id: '—', name: 'lodestone-nether-test-1', image: 'eclipse-temurin:21-jre', healthy: false },
+    }),
+    players: makePlayers([], [], []),
+    consoleHistory: [
+      { level: 'INFO', message: '[Lodestone] Container lodestone-nether-test-1 was removed', gap: [400_000, 400_000] },
+      { level: 'INFO', message: '[Lodestone] World archived-nether-test kept on disk', gap: [2000, 2000] },
+    ],
+  },
+];
+
+/* ------------------------------------------------------------------ *
+ * hydrate
+ * ------------------------------------------------------------------ */
+
+function hydrateProfile(seed: ProfileSeed): void {
+  const instanceCount = INSTANCE_SEEDS.filter((instance) => instance.profileId === seed.id).length;
+  const profile: Profile = {
+    id: seed.id,
+    name: seed.name,
+    description: seed.description,
+    softwareId: seed.softwareId,
+    software: SOFTWARE_LABEL[seed.softwareId],
+    version: seed.version,
+    javaMajor: javaFor(seed.version),
+    image: imageFor(seed.version),
+    memory: seed.memory,
+    cpuCores: seed.cpuCores,
+    javaArgs: seed.javaArgs,
+    autoStart: seed.autoStart,
+    restartOnCrash: seed.restartOnCrash,
+    crashThreshold: seed.crashThreshold,
+    ports: seed.ports,
+    createdAt: seed.createdAt,
+    updatedAt: seed.updatedAt,
+    instanceCount,
+  };
+  profiles.set(seed.id, { profile, properties: buildFields(seed.properties) });
+  if (seed.content) demoContent.seed(profile, seed.content.versions, seed.content.disabled);
+}
+
+function hydrateWorld(seed: WorldSeed): void {
+  const attached = INSTANCE_SEEDS.find((instance) => instance.worldId === seed.id)?.id ?? null;
+  const world: World = {
+    id: seed.id,
+    name: seed.name,
+    folder: seed.folder,
+    levelType: seed.levelType,
+    seed: seed.seed,
+    generateStructures: seed.generateStructures,
+    generated: seed.generated,
+    layout: INSTANCE_SEEDS.some((instance) => instance.worldId === seed.id && PROFILE_SEEDS.find((p) => p.id === instance.profileId)?.softwareId === 'paper')
+      ? 'bukkit'
+      : 'vanilla',
+    dataVersion: seed.generated ? 4189 : null,
+    savedWith: seed.generated ? '1.21.4' : null,
+    maxWorldSize: seed.maxWorldSize,
+    allowNether: seed.allowNether,
+    difficulty: seed.difficulty,
+    gamemode: seed.gamemode,
+    hardcore: seed.hardcore,
+    spawnProtection: seed.spawnProtection,
+    spawnMonsters: seed.spawnMonsters,
+    spawnNpcs: seed.spawnNpcs,
+    pvp: seed.pvp,
+    allowFlight: seed.allowFlight,
+    enableCommandBlock: seed.enableCommandBlock,
+    dataPacks: seed.dataPacks,
+    sizeBytes: seed.sizeBytes,
+    createdAt: seed.createdAt,
+    updatedAt: seed.updatedAt,
+    attachedInstanceId: attached,
+  };
+  const status: WorldStatus = {
+    worldId: seed.id,
+    attached: attached !== null,
+    diskBytes: seed.sizeBytes,
+    day: seed.status.day,
+    timeOfDay: seed.status.timeOfDay,
+    dimensions: { nether: seed.allowNether, end: false },
+    playerCount: seed.status.playerCount,
+    lastPlayedAt: seed.status.lastPlayedAt,
+  };
+  worlds.set(seed.id, {
+    world,
+    status,
+    backups: seed.backups,
+    properties: {
+      'level-name': seed.folder,
+      'level-seed': seed.seed ?? '',
+      'level-type': seed.levelType,
+      'generate-structures': String(seed.generateStructures),
+      'max-world-size': String(seed.maxWorldSize),
+      'allow-nether': String(seed.allowNether),
+      difficulty: seed.difficulty,
+      gamemode: seed.gamemode,
+      hardcore: String(seed.hardcore),
+      'force-gamemode': 'false',
+      pvp: String(seed.pvp),
+      'allow-flight': String(seed.allowFlight),
+      'enable-command-block': String(seed.enableCommandBlock),
+      'spawn-protection': String(seed.spawnProtection),
+      'spawn-monsters': String(seed.spawnMonsters),
+      'spawn-npcs': String(seed.spawnNpcs),
+      'initial-enabled-packs': seed.dataPacks.enabled.join(','),
+      'initial-disabled-packs': seed.dataPacks.disabled.join(','),
+    },
+  });
+}
+
+function seedConsole(instance: DemoInstance, history: { level: LogLevel; message: string; gap?: [number, number] }[]): void {
+  let ts = Date.now() - 40 * 60_000;
+  const lines: ConsoleLine[] = [];
+  for (const entry of history) {
+    const gapMs = entry.gap ? rand(entry.gap[0], entry.gap[1]) : rand(4000, 22000);
+    ts -= gapMs;
+    lines.push({
+      id: uid('line'),
+      ts,
+      level: entry.level,
+      message: entry.message.replace(/\{name\}/g, pick(SURVIVAL_ONLINE).name),
+      source: entry.message.startsWith('[Lodestone') ? 'lodestone' : 'server',
+    });
+  }
+  instance.console = lines.reverse();
+}
+
+function hydrateInstance(seed: InstanceSeed): void {
+  const profile = profiles.get(seed.profileId);
+  const world = worlds.get(seed.worldId);
+  if (!profile || !world) throw new Error(`seed ${seed.id} references a missing profile or world`);
+
+  const instance: Instance = {
+    id: seed.id,
+    name: seed.name,
+    profileId: seed.profileId,
+    worldId: seed.worldId,
+    state: seed.state,
+    players: seed.status.players ?? { online: 0, max: 20 },
+    address: seed.ports.minecraft === 25565 ? 'localhost' : `localhost:${seed.ports.minecraft}`,
+    ports: seed.ports,
+    environment: seed.environment,
+    createdAt: seed.createdAt,
+    lastError: null,
+    jobId: null,
+    profile: { name: profile.profile.name, software: profile.profile.software, version: profile.profile.version },
+    world: { name: world.world.name, folder: world.world.folder },
+  };
+
+  const demoInstance: DemoInstance = {
+    instance,
+    status: makeStatus({ ...seed.status, memory: { usedBytes: seed.status.memory?.usedBytes ?? 0, limitBytes: profile.profile.memory.maxMb * 1024 * 1024 } }),
+    players: seed.players,
+    console: [],
+    listeners: new Set(),
+    ticker: null,
+    timer: null,
+  };
+
+  if (seed.consoleHistory) seedConsole(demoInstance, seed.consoleHistory);
+  instances.set(seed.id, demoInstance);
+}
+
+WORLD_SEEDS.forEach(hydrateWorld);
+PROFILE_SEEDS.forEach(hydrateProfile);
+INSTANCE_SEEDS.forEach(hydrateInstance);
+
+/* ------------------------------------------------------------------ *
+ * metrics drift + console streaming
+ * ------------------------------------------------------------------ */
+
+function drift(instance: DemoInstance): void {
+  const status = instance.status;
+  if (status.state !== 'running') {
+    status.memory.usedBytes = 0;
+    status.cpuPercent = 0;
+    status.tps = null;
+    status.tickMs = null;
+    status.network.rxPerSec = 0;
+    status.network.txPerSec = 0;
+    status.players.online = 0;
+    status.uptimeSeconds = null;
+    status.startedAt = null;
+    return;
+  }
+
+  status.uptimeSeconds =
+    status.startedAt !== null ? Math.floor((Date.now() - Date.parse(status.startedAt)) / 1000) : null;
+  status.memory.usedBytes = Math.round(
+    jitter(status.memory.usedBytes, status.memory.limitBytes * 0.02, status.memory.limitBytes * 0.35, status.memory.limitBytes * 0.95),
+  );
+  status.cpuPercent = Math.round(jitter(status.cpuPercent, 7, 8, 96));
+  status.host.cpuPercent = status.cpuPercent;
+  status.tps = Number(jitter(status.tps ?? 20, 0.06, 17.8, 20).toFixed(2));
+  status.tickMs = Math.round(jitter(status.tickMs ?? 25, 5, 12, 49));
+  status.network.rxPerSec = Math.round(jitter(status.network.rxPerSec, 20 * 1024, 4 * 1024, 400 * 1024));
+  status.network.txPerSec = Math.round(jitter(status.network.txPerSec, 60 * 1024, 20 * 1024, 900 * 1024));
+  status.network.rxTotal += status.network.rxPerSec * 2;
+  status.network.txTotal += status.network.txPerSec * 2;
+}
+
+/** World metrics only drift while some instance has the world mounted. */
+function driftWorld(worldId: string): void {
+  const entry = worlds.get(worldId);
+  if (!entry) return;
+  entry.status.attached = entry.world.attachedInstanceId !== null;
+}
+
+const AMBIENT: { level: LogLevel; message: string }[] = [
+  { level: 'INFO', message: '{name} joined the game' },
+  { level: 'INFO', message: '{name} left the game' },
+  { level: 'INFO', message: '{name} issued server command: /list' },
+  { level: 'INFO', message: '{name} issued server command: /home base' },
+  { level: 'INFO', message: '{name} issued server command: /warp market' },
+  { level: 'INFO', message: '{name} has made the advancement [Diamonds!]' },
+  { level: 'INFO', message: '{name} has made the advancement [A Balanced Diet]' },
+  { level: 'INFO', message: '{name} was blown up by Creeper' },
+  { level: 'INFO', message: '{name} fell from a high place' },
+  { level: 'INFO', message: 'Saving the game (this may take a moment!)' },
+  { level: 'INFO', message: 'Saved the game' },
+  { level: 'INFO', message: 'ThreadedAnvilChunkStorage (world): All chunks are saved' },
+  { level: 'WARN', message: "Can't keep up! Is the server overloaded? Running 1184ms behind, skipping 23 ticks" },
+  { level: 'DEBUG', message: 'Preparing spawn area: 100%' },
+  { level: 'INFO', message: '{name} issued server command: /tp redstone_rae' },
+  { level: 'INFO', message: '{name} issued server command: /setblock ~ ~ ~ minecraft:redstone_block' },
+];
+
+function namesOnline(instance: DemoInstance): string[] {
+  const online = instance.players.players.filter((player) => player.online).map((player) => player.name);
+  return online.length > 0 ? online : ['Server'];
+}
+
+function stopTicker(instance: DemoInstance): void {
+  if (instance.ticker) {
+    clearInterval(instance.ticker);
+    instance.ticker = null;
+  }
+}
+
+function startTicker(instance: DemoInstance): void {
+  if (instance.ticker) return;
+  instance.ticker = setInterval(() => {
+    if (instance.instance.state !== 'running') return;
+    const names = namesOnline(instance);
+    const template = pick(AMBIENT);
+    push(instance, template.level, template.message.replace(/\{name\}/g, pick(names)));
+  }, 2400);
+}
+
+function transition(instance: DemoInstance, next: ServerState, delay: number, after?: () => void): void {
+  if (instance.timer) clearTimeout(instance.timer);
+  instance.timer = setTimeout(() => {
+    instance.timer = null;
+    instance.instance.state = next;
+    instance.status.state = next;
+    after?.();
+  }, delay);
+}
+
+function push(
+  instance: DemoInstance,
+  level: LogLevel,
+  message: string,
+  source: ConsoleLine['source'] = 'server',
+): void {
+  const line: ConsoleLine = { id: uid('line'), ts: Date.now(), level, message, source };
+  instance.console.push(line);
+  if (instance.console.length > 2000) instance.console.splice(0, instance.console.length - 2000);
+  instance.listeners.forEach((listener) => listener(line));
+}
+
+function startupLines(version: string, image: string, worldFolder: string): { level: LogLevel; message: string }[] {
+  return [
+    { level: 'INFO', message: `[Lodestone] Pulling ${image} (already present)` },
+    { level: 'INFO', message: `[Lodestone] Mounting world "${worldFolder}" into /server/world` },
+    { level: 'INFO', message: 'Starting minecraft server version ' + version },
+    { level: 'INFO', message: 'Loading properties' },
+    { level: 'INFO', message: 'Default game type: SURVIVAL' },
+    { level: 'INFO', message: 'Generating keypair' },
+    { level: 'INFO', message: `Preparing level "${worldFolder}"` },
+    { level: 'INFO', message: 'Preparing start region for dimension [minecraft:overworld]' },
+    { level: 'INFO', message: 'Preparing spawn area: 72%' },
+    { level: 'INFO', message: 'Time elapsed: 1842 ms' },
+    { level: 'INFO', message: 'RCON running on 0.0.0.0:25575' },
+    { level: 'INFO', message: 'Done (4.812s)! For help, type "help"' },
+  ];
+}
+
+const STOP_LINES: { level: LogLevel; message: string }[] = [
+  { level: 'INFO', message: 'Stopping the server' },
+  { level: 'INFO', message: 'Saving players' },
+  { level: 'INFO', message: 'Saving worlds' },
+  { level: 'INFO', message: 'Saving chunks for level ServerLevel[world]/minecraft:overworld' },
+  { level: 'INFO', message: 'ThreadedAnvilChunkStorage (world): All chunks are saved' },
+  { level: 'INFO', message: '[Lodestone] Container stopped, world left on disk' },
+];
+
+/* ------------------------------------------------------------------ *
+ * demo API — mirrors client.ts
+ * ------------------------------------------------------------------ */
+
+/* -------------------------------- worlds ------------------------------- */
+
+export function getWorlds(): World[] {
+  return [...worlds.values()].map((entry) => entry.world);
+}
+
+export function getWorld(id: string): World {
+  const entry = worlds.get(id);
+  if (!entry) throw new Error(`no such world: ${id}`);
+  return entry.world;
+}
+
+export function getWorldStatus(id: string): WorldStatus {
+  const entry = worlds.get(id);
+  if (!entry) throw new Error(`no such world: ${id}`);
+  driftWorld(id);
+  return entry.status;
+}
+
+export function createWorld(request: CreateWorldRequest): World {
+  const id = uniqueId(request.name, (candidate) => worlds.has(candidate));
+  const world: World = {
+    id,
+    name: request.name,
+    folder: id.replace(/-/g, '_'),
+    levelType: request.levelType,
+    seed: request.seed,
+    generateStructures: request.generateStructures,
+    // A world that has never been mounted has not generated yet.
+    generated: false,
+    layout: 'vanilla',
+    dataVersion: null,
+    savedWith: null,
+    maxWorldSize: request.maxWorldSize,
+    allowNether: request.allowNether,
+    difficulty: request.difficulty,
+    gamemode: request.gamemode,
+    hardcore: request.hardcore,
+    spawnProtection: request.hardcore ? 0 : 16,
+    spawnMonsters: request.difficulty !== 'peaceful',
+    spawnNpcs: request.difficulty !== 'peaceful',
+    pvp: true,
+    allowFlight: false,
+    enableCommandBlock: true,
+    dataPacks: { enabled: ['vanilla'], disabled: [] },
+    sizeBytes: 0,
+    createdAt: iso(),
+    updatedAt: iso(),
+    attachedInstanceId: null,
+  };
+  worlds.set(id, {
+    world,
+    status: {
+      worldId: id,
+      attached: false,
+      diskBytes: 0,
+      day: null,
+      timeOfDay: null,
+      dimensions: { nether: request.allowNether, end: false },
+      playerCount: 0,
+      lastPlayedAt: null,
+    },
+    backups: {
+      backups: [],
+      schedule: { enabled: false, intervalMinutes: 1440, retention: 7, lastRunAt: null, nextRunAt: null },
+      storage: { path: `/var/lib/lodestone/backups/${id}`, usedBytes: 0, quotaBytes: 50 * 1024 ** 3 },
+    },
+    properties: {
+      'level-name': world.folder,
+      'level-seed': request.seed ?? '',
+      'level-type': request.levelType,
+      'generate-structures': String(request.generateStructures),
+      'max-world-size': String(request.maxWorldSize),
+      'allow-nether': String(request.allowNether),
+      difficulty: request.difficulty,
+      gamemode: request.gamemode,
+      hardcore: String(request.hardcore),
+      'force-gamemode': 'false',
+      pvp: 'true',
+      'allow-flight': 'false',
+      'enable-command-block': 'true',
+      'spawn-protection': String(world.spawnProtection),
+      'spawn-monsters': String(world.spawnMonsters),
+      'spawn-npcs': String(world.spawnNpcs),
+      'initial-enabled-packs': 'vanilla',
+      'initial-disabled-packs': '',
+    },
+  });
+  return world;
+}
+
+export function updateWorld(id: string, body: UpdateWorldRequest): World {
+  const entry = worlds.get(id);
+  if (!entry) throw new Error(`no such world: ${id}`);
+  const world = entry.world;
+  const apply = <K extends keyof World>(key: K, value: World[K] | undefined) => {
+    if (value !== undefined) world[key] = value;
+  };
+  // Generation keys are locked once the world has generated (same rule as the backend).
+  const generationKey = (key: keyof World, value: unknown) => {
+    if (value === undefined || value === world[key]) return;
+    if (world.generated) {
+      throw new Error('Seed, level type and structures are fixed once a world has generated. Create a new world to change them.');
+    }
+    (world[key] as unknown) = value;
+  };
+  generationKey('levelType', body.levelType);
+  generationKey('generateStructures', body.generateStructures);
+  if (!world.generated && body.seed !== undefined) world.seed = body.seed;
+
+  apply('difficulty', body.difficulty);
+  apply('gamemode', body.gamemode);
+  apply('hardcore', body.hardcore);
+  apply('maxWorldSize', body.maxWorldSize);
+  apply('allowNether', body.allowNether);
+  apply('spawnProtection', body.spawnProtection);
+  apply('spawnMonsters', body.spawnMonsters);
+  apply('spawnNpcs', body.spawnNpcs);
+  apply('pvp', body.pvp);
+  apply('allowFlight', body.allowFlight);
+  apply('enableCommandBlock', body.enableCommandBlock);
+  apply('dataPacks', body.dataPacks);
+  if (body.name !== undefined && body.name.trim()) world.name = body.name.trim();
+  world.updatedAt = iso();
+
+  // Keep the mirrored properties in step.
+  entry.properties.difficulty = world.difficulty;
+  entry.properties.gamemode = world.gamemode;
+  entry.properties.hardcore = String(world.hardcore);
+  entry.properties['allow-nether'] = String(world.allowNether);
+  entry.properties['max-world-size'] = String(world.maxWorldSize);
+  entry.status.dimensions.nether = world.allowNether;
+  return world;
+}
+
+export function duplicateWorld(id: string): World {
+  const entry = worlds.get(id);
+  if (!entry) throw new Error(`no such world: ${id}`);
+  const copy = getWorld(createWorld({
+    name: `${entry.world.name} copy`,
+    levelType: entry.world.levelType,
+    seed: entry.world.seed,
+    generateStructures: entry.world.generateStructures,
+    difficulty: entry.world.difficulty,
+    gamemode: entry.world.gamemode,
+    hardcore: entry.world.hardcore,
+    maxWorldSize: entry.world.maxWorldSize,
+    allowNether: entry.world.allowNether,
+  }).id);
+  // A duplicate starts as a byte-for-byte copy, so it counts as generated.
+  const cloned = worlds.get(copy.id)!;
+  cloned.world.generated = entry.world.generated;
+  cloned.world.sizeBytes = entry.world.sizeBytes;
+  cloned.status.diskBytes = entry.world.sizeBytes;
+  cloned.status.day = entry.status.day;
+  return cloned.world;
+}
+
+export function deleteWorld(id: string): void {
+  const entry = worlds.get(id);
+  if (!entry) throw new Error(`no such world: ${id}`);
+  if (entry.world.attachedInstanceId) {
+    throw new Error(`world "${entry.world.name}" is attached to ${entry.world.attachedInstanceId}; detach it first`);
+  }
+  worlds.delete(id);
+}
+
+/* ------------------------------- profiles ------------------------------ */
+
+export function getProfiles(): Profile[] {
+  return [...profiles.values()].map((entry) => entry.profile);
+}
+
+export function getProfile(id: string): Profile {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`no such profile: ${id}`);
+  return entry.profile;
+}
+
+const SOFTWARE_VERSIONS: Record<ServerSoftwareId, string[]> = {
+  vanilla: ['1.21.4', '1.21.1', '1.20.6'],
+  paper: ['1.21.4', '1.21.1', '1.20.6'],
+  fabric: ['1.21.4', '1.21.1', '1.20.4'],
+  forge: ['1.21.1', '1.20.6'],
+  neoforge: ['1.21.4', '1.21.1'],
+};
+
+const SOFTWARE_BLURB: Record<ServerSoftwareId, string> = {
+  vanilla: 'Unmodified. No plugins or mods — the baseline every world falls back to.',
+  paper: 'High performance fork with a plugin API. The default for survival worlds.',
+  fabric: 'Lightweight mod loader. Best for client-visible mods like Create or Sodium.',
+  forge: 'Long-standing mod loader with the widest legacy mod coverage.',
+  neoforge: 'Community fork of Forge, tracking the newest Minecraft releases.',
+};
+
+export function getSoftware(): SoftwareCatalog {
+  return {
+    software: (Object.keys(SOFTWARE_LABEL) as ServerSoftwareId[]).map((id) => ({
+      id,
+      label: SOFTWARE_LABEL[id],
+      blurb: SOFTWARE_BLURB[id],
+      kind: id === 'vanilla' ? 'vanilla' : id === 'paper' ? 'plugins' : 'mods',
+      versions: SOFTWARE_VERSIONS[id].map((version) => ({ version, javaMajor: javaFor(version), stable: true })),
+    })),
+  };
+}
+
+function countInstancesUsingProfile(profileId: string): number {
+  return [...instances.values()].filter((entry) => entry.instance.profileId === profileId).length;
+}
+
+export function createProfile(request: CreateProfileRequest): Profile {
+  const id = uniqueId(request.name, (candidate) => profiles.has(candidate));
+  const profile: Profile = {
+    id,
+    name: request.name,
+    description: request.description,
+    softwareId: request.softwareId,
+    software: SOFTWARE_LABEL[request.softwareId],
+    version: request.version,
+    javaMajor: javaFor(request.version),
+    image: imageFor(request.version),
+    memory: request.memory,
+    cpuCores: request.cpuCores,
+    javaArgs: request.javaArgs,
+    autoStart: request.autoStart,
+    restartOnCrash: request.restartOnCrash,
+    crashThreshold: request.crashThreshold,
+    ports: { rcon: 25575 + profiles.size * 10, query: null },
+    createdAt: iso(),
+    updatedAt: iso(),
+    instanceCount: 0,
+  };
+  profiles.set(id, {
+    profile,
+    properties: buildFields({
+      motd: `§a${request.name}`,
+      'max-players': '20',
+      'rcon.password': Math.random().toString(36).slice(2, 18).padEnd(16, '0'),
+      'rcon.port': String(profile.ports.rcon),
+    }),
+  });
+  return profile;
+}
+
+export function updateProfile(id: string, body: UpdateProfileRequest): Profile {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`no such profile: ${id}`);
+  const profile = entry.profile;
+  if (body.name !== undefined && body.name.trim()) profile.name = body.name.trim();
+  if (body.description !== undefined) profile.description = body.description;
+  if (body.softwareId !== undefined) {
+    profile.softwareId = body.softwareId;
+    profile.software = SOFTWARE_LABEL[body.softwareId];
+  }
+  if (body.version !== undefined) {
+    profile.version = body.version;
+    profile.javaMajor = javaFor(body.version);
+    profile.image = imageFor(body.version);
+  }
+  if (body.memory !== undefined) profile.memory = body.memory;
+  if (body.cpuCores !== undefined) profile.cpuCores = body.cpuCores;
+  if (body.javaArgs !== undefined) profile.javaArgs = body.javaArgs;
+  if (body.autoStart !== undefined) profile.autoStart = body.autoStart;
+  if (body.restartOnCrash !== undefined) profile.restartOnCrash = body.restartOnCrash;
+  if (body.crashThreshold !== undefined) profile.crashThreshold = body.crashThreshold;
+  profile.updatedAt = iso();
+  profile.instanceCount = countInstancesUsingProfile(id);
+
+  // Instances render their profile name and version, so keep them in step.
+  for (const running of instances.values()) {
+    if (running.instance.profileId !== id) continue;
+    running.instance.profile = { name: profile.name, software: profile.software, version: profile.version };
+    running.status.container.image = profile.image;
+    running.status.memory.limitBytes = profile.memory.maxMb * 1024 * 1024;
+  }
+  return profile;
+}
+
+export function duplicateProfile(id: string): Profile {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`no such profile: ${id}`);
+  const copy = createProfile({
+    name: `${entry.profile.name} copy`,
+    description: entry.profile.description,
+    softwareId: entry.profile.softwareId,
+    version: entry.profile.version,
+    memory: { ...entry.profile.memory },
+    cpuCores: entry.profile.cpuCores,
+    javaArgs: entry.profile.javaArgs,
+    autoStart: entry.profile.autoStart,
+    restartOnCrash: entry.profile.restartOnCrash,
+    crashThreshold: entry.profile.crashThreshold,
+  });
+  const cloned = profiles.get(copy.id)!;
+  cloned.properties = entry.properties.map((field) => ({ ...field }));
+  demoContent.copyContent(id, copy.id);
+  return copy;
+}
+
+export function deleteProfile(id: string): void {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`no such profile: ${id}`);
+  const using = countInstancesUsingProfile(id);
+  if (using > 0) {
+    throw new Error(`profile "${entry.profile.name}" is used by ${using} instance${using === 1 ? '' : 's'}`);
+  }
+  profiles.delete(id);
+}
+
+export function getProfileProperties(id: string): { path: string; updatedAt: string; fields: PropertyField[] } {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`no such profile: ${id}`);
+  // The editor only offers what a profile owns.
+  return {
+    path: '/srv/lodestone/profiles/' + id + '/server.properties',
+    updatedAt: entry.profile.updatedAt,
+    fields: splitFields(entry.properties, 'profile'),
+  };
+}
+
+export function saveProfileProperties(id: string, changes: Record<string, string>): { path: string; updatedAt: string; fields: PropertyField[] } {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`no such profile: ${id}`);
+  // Same ownership rules as the backend (`properties::validate_profile_changes`).
+  for (const key of Object.keys(changes)) {
+    const def = PROPERTY_DEFS.find((field) => field.key === key);
+    if (!def) throw new Error(`\`${key}\` is not a known server property.`);
+    if (def.scope !== 'profile') throw new Error(`\`${key}\` belongs to the ${def.scope}; edit it there.`);
+    if (def.readOnly) throw new Error(`\`${key}\` is managed by Lodestone and cannot be edited.`);
+  }
+  entry.properties = entry.properties.map((field) =>
+    field.scope === 'profile' && field.key in changes && !field.readOnly
+      ? { ...field, value: changes[field.key] }
+      : field,
+  );
+  const maxPlayers = entry.properties.find((field) => field.key === 'max-players')?.value;
+  if (maxPlayers) {
+    entry.profile.updatedAt = iso();
+    for (const running of instances.values()) {
+      if (running.instance.profileId !== id) continue;
+      running.instance.players.max = Number(maxPlayers);
+      running.status.players.max = Number(maxPlayers);
+    }
+  }
+  return getProfileProperties(id);
+}
+
+/* --------------------------- mods and plugins -------------------------- */
+
+const profileOf = (id: string): Profile => {
+  const entry = profiles.get(id);
+  if (!entry) throw new Error(`No configuration with id \`${id}\`.`);
+  return entry.profile;
+};
+
+export const getContent = (id: string): ContentIndex => demoContent.index(profileOf(id));
+export const searchContent = (
+  id: string,
+  params: { q: string; provider?: ContentSource; sort?: string; offset?: number; limit?: number },
+): ContentSearchResult => demoContent.search(profileOf(id), params);
+export const getContentVersions = (id: string, provider: ContentSource, project: string): ContentVersion[] =>
+  demoContent.versions(profileOf(id), provider, project);
+export const planContent = (id: string, body: ContentPlanRequest): InstallPlan =>
+  demoContent.plan(profileOf(id), body.items);
+export const applyContent = (id: string, items: ContentRef[]): ContentIndex => demoContent.apply(profileOf(id), items);
+export const setContentEnabled = (id: string, entry: string, enabled: boolean): ContentIndex =>
+  demoContent.setEnabled(profileOf(id), entry, enabled);
+export const removeContent = (id: string, entry: string): ContentIndex => demoContent.remove(profileOf(id), entry);
+export const updateContent = (id: string, entry: string): ContentIndex => demoContent.update(profileOf(id), entry);
+export const checkContentUpdates = (id: string): ContentIndex => demoContent.checkUpdates(profileOf(id));
+export const uploadContent = (id: string, filename: string, size: number, text?: string): ContentIndex =>
+  demoContent.upload(profileOf(id), filename, size, text);
+export const provideContentFile = (id: string, entry: string, filename: string, text: string): ContentIndex =>
+  demoContent.provideFile(profileOf(id), entry, filename, text);
+
+const demoJobs: Job[] = [];
+
+/** The demo can't read zips: it makes an empty Fabric configuration named after the file. */
+export function importModpack(filename: string): Job {
+  if (!filename.toLowerCase().endsWith('.mrpack')) throw new Error("That isn't a Modrinth modpack: it isn't a .mrpack file.");
+  const name = filename.replace(/\.mrpack$/i, '');
+  const profile = createProfile({
+    name,
+    description: 'Imported modpack (demo: the pack itself is not read)',
+    softwareId: 'fabric',
+    version: '1.21.4',
+    memory: { minMb: 2048, maxMb: 6144, initialMb: 2048 },
+    cpuCores: null,
+    javaArgs: settings.defaultJavaArgs,
+    autoStart: false,
+    restartOnCrash: true,
+    crashThreshold: 3,
+  });
+  const now = iso();
+  const job: Job = {
+    id: `job-demo-${demoJobs.length + 1}`,
+    kind: 'import',
+    targetId: profile.id,
+    state: 'succeeded',
+    progress: 1,
+    message: `Imported ${name} with 0 mods`,
+    error: null,
+    createdAt: now,
+    finishedAt: now,
+  };
+  demoJobs.unshift(job);
+  return job;
+}
+
+export const getJobs = (): Job[] => [...demoJobs];
+
+/* ------------------------------ instances ------------------------------ */
+
+export function getInstances(): Instance[] {
+  return [...instances.values()].map((entry) => entry.instance);
+}
+
+export function getInstance(id: string): Instance {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  return entry.instance;
+}
+
+/** Mirrors the backend: creates the world/profile inline when asked, in one step. */
+export function createInstance(request: CreateInstanceRequest): Instance {
+  if (!request.name.trim()) throw new Error('Give the instance a name.');
+  if (!!request.worldId === !!request.newWorld) throw new Error('Pick an existing world or describe a new one (not both).');
+  if (!!request.profileId === !!request.newProfile) {
+    throw new Error('Pick an existing configuration or describe a new one (not both).');
+  }
+  const existingWorld = request.worldId ? worlds.get(request.worldId) : undefined;
+  if (request.worldId && !existingWorld) throw new Error(`No world with id \`${request.worldId}\`.`);
+  if (existingWorld?.world.attachedInstanceId) {
+    throw new Error(`"${existingWorld.world.name}" is already attached to another instance.`);
+  }
+  const existingProfile = request.profileId ? profiles.get(request.profileId) : undefined;
+  if (request.profileId && !existingProfile) throw new Error(`No profile with id \`${request.profileId}\`.`);
+
+  const used = new Set(
+    [...instances.values()].flatMap(({ instance }) => [instance.ports.minecraft, instance.ports.rcon, instance.ports.query ?? 0]),
+  );
+  const claim = (port: number | undefined, start: number): number => {
+    if (port !== undefined) {
+      if (used.has(port)) throw new Error(`Port ${port} is already used by another instance.`);
+      used.add(port);
+      return port;
+    }
+    let candidate = start;
+    while (used.has(candidate)) candidate += 1;
+    used.add(candidate);
+    return candidate;
+  };
+  const minecraftPort = claim(request.minecraftPort, 25565);
+  const rconPort = claim(request.rconPort, 25575);
+  const queryPort = request.queryPort !== undefined ? claim(request.queryPort, 25565) : null;
+
+  const worldId = existingWorld ? existingWorld.world.id : createWorld(request.newWorld!).id;
+  const profileId = existingProfile ? existingProfile.profile.id : createProfile(request.newProfile!).id;
+  const profile = profiles.get(profileId)!;
+  const world = worlds.get(worldId)!;
+
+  const id = uniqueId(request.name, (candidate) => instances.has(candidate));
+  const instance: Instance = {
+    id,
+    name: request.name.trim() || id,
+    profileId,
+    worldId,
+    state: 'stopped',
+    players: { online: 0, max: Number(profile.properties.find((f) => f.key === 'max-players')?.value ?? 20) },
+    address: minecraftPort === 25565 ? 'localhost' : `localhost:${minecraftPort}`,
+    ports: { minecraft: minecraftPort, rcon: rconPort, query: queryPort },
+    environment: request.environment ?? { TZ: 'UTC' },
+    createdAt: iso(),
+    lastError: null,
+    jobId: null,
+    profile: { name: profile.profile.name, software: profile.profile.software, version: profile.profile.version },
+    world: { name: world.world.name, folder: world.world.folder },
+  };
+
+  const demoInstance: DemoInstance = {
+    instance,
+    status: makeStatus({
+      state: 'stopped',
+      players: { online: 0, max: instance.players.max },
+      memory: { usedBytes: 0, limitBytes: profile.profile.memory.maxMb * 1024 * 1024 },
+      container: {
+        id: '—',
+        name: `lodestone-${id}`,
+        image: profile.profile.image,
+        healthy: false,
+      },
+    }),
+    players: makePlayers([], [], []),
+    console: [],
+    listeners: new Set(),
+    ticker: null,
+    timer: null,
+  };
+
+  instances.set(id, demoInstance);
+  world.world.attachedInstanceId = id;
+  world.status.attached = true;
+  profile.profile.instanceCount = countInstancesUsingProfile(profileId);
+
+  push(demoInstance, 'INFO', `[Lodestone] Instance "${instance.name}" created from ${profile.profile.name}`, 'lodestone');
+  push(demoInstance, 'INFO', `[Lodestone] World "${world.world.name}" attached — nothing is generated until first start`, 'lodestone');
+  if (request.start) postAction(id, 'start');
+  return instance;
+}
+
+export function updateInstance(id: string, body: UpdateInstanceRequest): Instance {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  const instance = entry.instance;
+  if (body.name !== undefined && body.name.trim()) instance.name = body.name.trim();
+  if (body.minecraftPort !== undefined) {
+    instance.ports.minecraft = body.minecraftPort;
+    instance.address = body.minecraftPort === 25565 ? 'localhost' : `localhost:${body.minecraftPort}`;
+  }
+  if (body.rconPort !== undefined) instance.ports.rcon = body.rconPort;
+  if (body.queryPort !== undefined) instance.ports.query = body.queryPort;
+  if (body.environment !== undefined) instance.environment = body.environment;
+  return instance;
+}
+
+export function deleteInstance(id: string): void {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  stopTicker(entry);
+  if (entry.timer) clearTimeout(entry.timer);
+
+  // Detach the world, but keep it (and its backups) on disk.
+  const world = worlds.get(entry.instance.worldId);
+  if (world && world.world.attachedInstanceId === id) {
+    world.world.attachedInstanceId = null;
+    world.status.attached = false;
+    world.world.updatedAt = iso();
+  }
+  const profile = profiles.get(entry.instance.profileId);
+  instances.delete(id);
+  if (profile) profile.profile.instanceCount = countInstancesUsingProfile(entry.instance.profileId);
+}
+
+/**
+ * Rebinds an instance to another world. A running instance is stopped,
+ * the mount is swapped and the server is started again on the new world.
+ */
+export function switchInstanceWorld(id: string, worldId: string): Instance {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  const target = worlds.get(worldId);
+  if (!target) throw new Error(`no such world: ${worldId}`);
+  if (target.world.attachedInstanceId && target.world.attachedInstanceId !== id) {
+    throw new Error(`world "${target.world.name}" is already attached to ${target.world.attachedInstanceId}`);
+  }
+
+  const previous = worlds.get(entry.instance.worldId);
+  if (previous && previous.world.attachedInstanceId === id) {
+    previous.world.attachedInstanceId = null;
+    previous.status.attached = false;
+  }
+  target.world.attachedInstanceId = id;
+  target.status.attached = true;
+  target.world.updatedAt = iso();
+
+  entry.instance.worldId = worldId;
+  entry.instance.world = { name: target.world.name, folder: target.world.folder };
+
+  const wasRunning = entry.instance.state === 'running' || entry.instance.state === 'starting';
+  push(entry, 'INFO', `[Lodestone] Switching world to "${target.world.name}"`, 'lodestone');
+  if (wasRunning) {
+    push(entry, 'INFO', '[Lodestone] Restarting to mount the new world', 'lodestone');
+  }
+  // The world generates on first mount.
+  if (!target.world.generated) {
+    target.world.generated = true;
+    push(entry, 'INFO', `[Lodestone] "${target.world.name}" generated for the first time`, 'lodestone');
+  }
+  return entry.instance;
+}
+
+export function postAction(id: string, action: ServerAction): Instance {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  const profile = profiles.get(entry.instance.profileId);
+  const world = worlds.get(entry.instance.worldId);
+  const image = profile?.profile.image ?? entry.status.container.image;
+  const version = profile?.profile.version ?? '1.21.4';
+  const folder = world?.world.folder ?? 'world';
+
+  if (action === 'start') {
+    if (entry.instance.state === 'running') return entry.instance;
+    entry.instance.state = 'starting';
+    entry.status.state = 'starting';
+    push(entry, 'INFO', `[Lodestone] Starting container lodestone-${id}`, 'lodestone');
+    startupLines(version, image, folder).forEach((line, index) => {
+      setTimeout(() => push(entry, line.level, line.message), 250 * (index + 1));
+    });
+    transition(entry, 'running', 250 * (startupLines(version, image, folder).length + 2), () => {
+      entry.status.startedAt = iso();
+      entry.status.uptimeSeconds = 0;
+      entry.status.players = { ...entry.status.players, online: 0 };
+      entry.status.memory.usedBytes = Math.round(entry.status.memory.limitBytes * 0.42);
+      entry.status.tps = 20;
+      entry.status.tickMs = 18;
+      entry.status.cpuPercent = 44;
+      entry.status.container.healthy = true;
+      if (world) {
+        world.world.generated = true;
+        world.status.day = Math.max(1, world.status.day ?? 0);
+        world.status.timeOfDay = '06:00';
+        world.status.lastPlayedAt = iso();
+      }
+      startTicker(entry);
+    });
+  }
+
+  if (action === 'stop') {
+    if (entry.instance.state === 'stopped') return entry.instance;
+    entry.instance.state = 'stopping';
+    entry.status.state = 'stopping';
+    STOP_LINES.forEach((line, index) => setTimeout(() => push(entry, line.level, line.message), 300 * (index + 1)));
+    transition(entry, 'stopped', 300 * (STOP_LINES.length + 2), () => {
+      entry.status.container.healthy = false;
+      stopTicker(entry);
+      drift(entry);
+    });
+  }
+
+  if (action === 'restart') {
+    entry.instance.state = 'stopping';
+    entry.status.state = 'stopping';
+    STOP_LINES.forEach((line, index) => setTimeout(() => push(entry, line.level, line.message), 250 * (index + 1)));
+    transition(entry, 'starting', 250 * (STOP_LINES.length + 1), () => {
+      push(entry, 'INFO', '[Lodestone] Restarting container', 'lodestone');
+      startupLines(version, image, folder).forEach((line, index) =>
+        setTimeout(() => push(entry, line.level, line.message), 250 * (index + 1)),
+      );
+      transition(entry, 'running', 250 * (startupLines(version, image, folder).length + 2), () => {
+        entry.status.startedAt = iso();
+        entry.status.uptimeSeconds = 0;
+        entry.status.tps = 20;
+        entry.status.tickMs = 18;
+        entry.status.container.healthy = true;
+        startTicker(entry);
+      });
+    });
+  }
+
+  return entry.instance;
+}
+
+/* ------------------------------- console ------------------------------- */
+
+export function getConsole(id: string, tail = 500): ConsoleLine[] {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  return entry.console.slice(-tail);
+}
+
+export function subscribeConsole(id: string, listener: (line: ConsoleLine) => void): () => void {
+  const entry = instances.get(id);
+  if (!entry) return () => undefined;
+  entry.listeners.add(listener);
+  if (entry.instance.state === 'running') startTicker(entry);
+  return () => {
+    entry.listeners.delete(listener);
+    if (entry.listeners.size === 0) stopTicker(entry);
+  };
+}
+
+function commandResponse(entry: DemoInstance, command: string): { level: LogLevel; message: string }[] {
+  const trimmed = command.trim();
+  const online = namesOnline(entry);
+  const base = trimmed.startsWith('/') ? trimmed.slice(1) : trimmed;
+  const [name, ...args] = base.split(/\s+/);
+  const world = worlds.get(entry.instance.worldId);
+
+  if (entry.instance.state !== 'running') {
+    return [
+      { level: 'ERROR', message: `[Lodestone] Cannot run "/${base}": ${entry.instance.name} is ${entry.instance.state}` },
+    ];
+  }
+
+  switch (name) {
+    case 'list':
+      return [
+        {
+          level: 'INFO',
+          message: `There are ${online.length} of a maximum of ${entry.instance.players.max} players online: ${online.join(', ')}`,
+        },
+      ];
+    case 'help':
+      return [
+        { level: 'INFO', message: '/help — show this help' },
+        { level: 'INFO', message: '/list — list online players' },
+        { level: 'INFO', message: '/save-all — save chunks, players and the world' },
+        { level: 'INFO', message: '/time set <day|night|noon> — change the world time' },
+        { level: 'INFO', message: '/weather <clear|rain|thunder> — change the weather' },
+        { level: 'INFO', message: '/whitelist <add|remove|list> — manage the whitelist' },
+        { level: 'INFO', message: '/tps — Paper only: tick rate over 1m, 5m, 15m' },
+      ];
+    case 'save-all':
+      return [
+        { level: 'INFO', message: 'Saving the game (this may take a moment!)' },
+        { level: 'INFO', message: 'Saved the game' },
+      ];
+    case 'save-off':
+      return [{ level: 'INFO', message: 'Automatic saving is now disabled' }];
+    case 'save-on':
+      return [{ level: 'INFO', message: 'Automatic saving is now enabled' }];
+    case 'time':
+      return [{ level: 'INFO', message: `Set the time to ${args[1] === 'night' ? 13000 : args[1] === 'noon' ? 6000 : 1000}` }];
+    case 'weather':
+      return [{ level: 'INFO', message: `Set the weather to ${args[0] ?? 'clear'}` }];
+    case 'difficulty':
+      return [{ level: 'INFO', message: `Set the difficulty to ${args[0] ?? 'normal'} — this world only` }];
+    case 'tps':
+      return [
+        {
+          level: 'INFO',
+          message: `TPS from last 1m, 5m, 15m: ${(entry.status.tps ?? 20).toFixed(2)}, ${Math.max(19.1, (entry.status.tps ?? 20) - 0.2).toFixed(2)}, 19.98`,
+        },
+      ];
+    case 'seed':
+      return [{ level: 'INFO', message: `Seed: [${world?.world.seed ?? 'random'}]` }];
+    case 'whitelist': {
+      const sub = args[0];
+      if (sub === 'list') {
+        const listed = entry.players.players.filter((player) => player.whitelisted).map((player) => player.name);
+        return [
+          { level: 'INFO', message: `There are ${listed.length} whitelisted players: ${listed.join(', ') || '(none)'}` },
+        ];
+      }
+      if (sub === 'on') {
+        entry.players.whitelistEnabled = true;
+        return [{ level: 'INFO', message: 'Whitelist is now turned on' }];
+      }
+      if (sub === 'off') {
+        entry.players.whitelistEnabled = false;
+        return [{ level: 'INFO', message: 'Whitelist is now turned off' }];
+      }
+      if (sub === 'add' || sub === 'remove') {
+        const target = args[1];
+        if (!target) return [{ level: 'ERROR', message: 'Usage: /whitelist <add|remove> <name>' }];
+        const player = entry.players.players.find((item) => item.name.toLowerCase() === target.toLowerCase());
+        if (player) player.whitelisted = sub === 'add';
+        return [
+          {
+            level: 'INFO',
+            message: sub === 'add' ? `Added ${target} to the whitelist` : `Removed ${target} from the whitelist`,
+          },
+        ];
+      }
+      return [{ level: 'ERROR', message: 'Usage: /whitelist <add|remove|on|off|list>' }];
+    }
+    case 'op':
+    case 'deop': {
+      const target = args[0];
+      const player = entry.players.players.find((item) => item.name.toLowerCase() === (target ?? '').toLowerCase());
+      if (player) player.op = name === 'op';
+      return [
+        {
+          level: 'INFO',
+          message: target
+            ? name === 'op'
+              ? `Made ${target} a server operator`
+              : `Made ${target} no longer a server operator`
+            : `Usage: /${name} <name>`,
+        },
+      ];
+    }
+    case 'kick': {
+      const target = args[0];
+      if (!target) return [{ level: 'ERROR', message: 'Usage: /kick <name> [reason]' }];
+      const player = entry.players.players.find((item) => item.name.toLowerCase() === target.toLowerCase());
+      if (player?.online) player.online = false;
+      entry.status.players.online = entry.players.players.filter((item) => item.online).length;
+      return [
+        { level: 'INFO', message: `${target} was kicked by the server: ${args.slice(1).join(' ') || 'Kicked by an operator'}` },
+        { level: 'INFO', message: `${target} left the game` },
+      ];
+    }
+    case 'ban':
+    case 'ban-ip': {
+      const target = args[0];
+      if (!target) return [{ level: 'ERROR', message: `Usage: /${name} <target> [reason]` }];
+      entry.players.bans.unshift({
+        uuid: null,
+        name: target,
+        reason: args.slice(1).join(' ') || 'Banned by an operator',
+        bannedBy: 'Lodestone',
+        createdAt: iso(),
+        expiresAt: null,
+      });
+      const player = entry.players.players.find((item) => item.name.toLowerCase() === target.toLowerCase());
+      if (player) player.online = false;
+      entry.status.players.online = entry.players.players.filter((item) => item.online).length;
+      return [{ level: 'INFO', message: `Banned ${target}: ${args.slice(1).join(' ') || 'Banned by an operator'}` }];
+    }
+    case 'pardon': {
+      const target = args[0];
+      entry.players.bans = entry.players.bans.filter((item) => item.name.toLowerCase() !== (target ?? '').toLowerCase());
+      return [{ level: 'INFO', message: target ? `Pardoned ${target}` : 'Usage: /pardon <name>' }];
+    }
+    case 'stop':
+      return [{ level: 'INFO', message: '[Lodestone] Sending stop, waiting for the container to exit' }];
+    case 'say':
+      return [{ level: 'INFO', message: `[Server] ${args.join(' ') || '...'}` }];
+    default:
+      return [
+        { level: 'ERROR', message: 'Unknown or incomplete command, see below for error' },
+        { level: 'ERROR', message: `${base.substring(Math.max(0, base.length - 8))}<--[PREVIOUS_HERE]` },
+      ];
+  }
+}
+
+export function sendCommand(id: string, command: string): ConsoleLine[] {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  const trimmed = command.trim();
+  if (!trimmed) return [];
+
+  const echo: ConsoleLine = {
+    id: uid('line'),
+    ts: Date.now(),
+    level: 'INFO',
+    message: `Console issued server command: ${trimmed}`,
+    source: 'rcon',
+  };
+  entry.console.push(echo);
+  entry.listeners.forEach((listener) => listener(echo));
+
+  const responses = commandResponse(entry, trimmed).map((response) => {
+    const line: ConsoleLine = {
+      id: uid('line'),
+      ts: Date.now() + 1,
+      level: response.level,
+      message: response.message,
+      source: 'server',
+    };
+    entry.console.push(line);
+    entry.listeners.forEach((listener) => listener(line));
+    return line;
+  });
+
+  if (entry.console.length > 2000) entry.console.splice(0, entry.console.length - 2000);
+  if (trimmed.replace('/', '') === 'stop') setTimeout(() => postAction(id, 'stop'), 400);
+
+  return [echo, ...responses];
+}
+
+/* ------------------------------- players ------------------------------- */
+
+export function getPlayers(id: string): ServerPlayers {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  const bans: BanEntry[] = entry.players.bans;
+  // Like the backend: whitelist flags are the profile's properties.
+  const props = profiles.get(entry.instance.profileId)?.properties ?? [];
+  const flag = (key: string) => props.find((field) => field.key === key)?.value === 'true';
+  return { ...entry.players, bans, whitelistEnabled: flag('white-list'), whitelistEnforced: flag('enforce-whitelist') };
+}
+
+export function postPlayerAction(
+  id: string,
+  request: { action: string; name: string; reason?: string },
+): ServerPlayers {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  const player = entry.players.players.find((item) => item.name.toLowerCase() === request.name.toLowerCase());
+
+  switch (request.action) {
+    case 'kick':
+      if (player) player.online = false;
+      push(entry, 'INFO', `${request.name} was kicked by the server: ${request.reason || 'Kicked by an operator'}`);
+      push(entry, 'INFO', `${request.name} left the game`);
+      break;
+    case 'op':
+      if (player) player.op = true;
+      push(entry, 'INFO', `Made ${request.name} a server operator`);
+      break;
+    case 'deop':
+      if (player) player.op = false;
+      push(entry, 'INFO', `Made ${request.name} no longer a server operator`);
+      break;
+    case 'whitelist-add':
+      if (player) player.whitelisted = true;
+      else
+        entry.players.players.push({
+          uuid: uid('uuid'),
+          name: request.name,
+          online: false,
+          pingMs: null,
+          playtimeSeconds: 0,
+          dimension: null,
+          op: false,
+          whitelisted: true,
+          firstSeen: iso(),
+          lastSeen: iso(),
+        });
+      entry.players.whitelistEnabled = true;
+      push(entry, 'INFO', `Added ${request.name} to the whitelist`);
+      break;
+    case 'whitelist-remove':
+      if (player) player.whitelisted = false;
+      push(entry, 'INFO', `Removed ${request.name} from the whitelist`);
+      break;
+    case 'ban':
+      entry.players.bans.unshift({
+        uuid: player?.uuid ?? null,
+        name: request.name,
+        reason: request.reason || 'Banned by an operator',
+        bannedBy: 'Lodestone',
+        createdAt: iso(),
+        expiresAt: null,
+      });
+      if (player) player.online = false;
+      push(entry, 'INFO', `Banned ${request.name}: ${request.reason || 'Banned by an operator'}`);
+      break;
+    case 'pardon':
+      entry.players.bans = entry.players.bans.filter((item) => item.name !== request.name);
+      push(entry, 'INFO', `Pardoned ${request.name}`);
+      break;
+    default:
+      break;
+  }
+
+  entry.status.players.online = entry.players.players.filter((item) => item.online).length;
+  return getPlayers(id);
+}
+
+/* ------------------------------- backups ------------------------------- */
+
+export function getBackups(worldId: string): BackupIndex {
+  const entry = worlds.get(worldId);
+  if (!entry) throw new Error(`no such world: ${worldId}`);
+  const { schedule } = entry.backups;
+  if (schedule.enabled && schedule.nextRunAt && Date.parse(schedule.nextRunAt) < Date.now()) {
+    schedule.lastRunAt = schedule.nextRunAt;
+    schedule.nextRunAt = iso(schedule.intervalMinutes * 60_000);
+  }
+  return entry.backups;
+}
+
+export function createBackup(worldId: string): Backup {
+  const entry = worlds.get(worldId);
+  if (!entry) throw new Error(`no such world: ${worldId}`);
+  const backupEntry: Backup = {
+    id: uid('bk'),
+    worldId,
+    name: 'Manual',
+    kind: 'manual',
+    createdAt: iso(),
+    sizeBytes: Math.round((0.4 + Math.random() * 3) * 1024 ** 3),
+    status: 'running',
+    instanceId: entry.world.attachedInstanceId,
+  };
+  entry.backups.backups.unshift(backupEntry);
+  setTimeout(() => {
+    backupEntry.status = 'complete';
+    entry.backups.storage.usedBytes += backupEntry.sizeBytes;
+  }, 3500);
+  return backupEntry;
+}
+
+export function deleteBackup(worldId: string, backupId: string): void {
+  const entry = worlds.get(worldId);
+  if (!entry) throw new Error(`no such world: ${worldId}`);
+  const found = entry.backups.backups.find((item) => item.id === backupId);
+  entry.backups.backups = entry.backups.backups.filter((item) => item.id !== backupId);
+  if (found) entry.backups.storage.usedBytes = Math.max(0, entry.backups.storage.usedBytes - found.sizeBytes);
+}
+
+export function restoreBackup(worldId: string, backupId: string): void {
+  const entry = worlds.get(worldId);
+  if (!entry) throw new Error(`no such world: ${worldId}`);
+  const attached = entry.world.attachedInstanceId;
+  if (attached) {
+    const instance = instances.get(attached);
+    if (instance) push(instance, 'WARN', `[Lodestone] Restoring backup ${backupId}, the server will restart`, 'lodestone');
+    postAction(attached, 'restart');
+  }
+}
+
+export function patchSchedule(worldId: string, patchBody: UpdateScheduleRequest): BackupIndex {
+  const entry = worlds.get(worldId);
+  if (!entry) throw new Error(`no such world: ${worldId}`);
+  entry.backups.schedule = {
+    ...entry.backups.schedule,
+    ...patchBody,
+    nextRunAt:
+      patchBody.enabled === true || (patchBody.intervalMinutes && entry.backups.schedule.enabled)
+        ? iso((patchBody.intervalMinutes ?? entry.backups.schedule.intervalMinutes) * 60_000)
+        : entry.backups.schedule.nextRunAt,
+  };
+  return entry.backups;
+}
+
+/* --------------------------- drift snapshots --------------------------- */
+
+/** Current metrics for an instance, with the demo drift applied first. */
+export function snapshotStatus(id: string): InstanceStatus {
+  const entry = instances.get(id);
+  if (!entry) throw new Error(`no such instance: ${id}`);
+  drift(entry);
+  entry.instance.players = entry.status.players;
+  return entry.status;
+}
+
+export { drift, driftWorld };
+export { ADVANCEMENTS, DEATHS, AMBIENT_LINES, playerLine, int, pick };
+
+
+
+/* ---------------------------- settings / system ------------------------ */
+
+const settings: AppSettings = {
+  publicAddress: '',
+  defaultJavaArgs: '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200',
+  curseforgeKeySet: false,
+};
+
+/** The demo can't read zips: it adds a generated world named after the file. */
+export function importWorld(filename: string): World {
+  if (!filename.toLowerCase().endsWith('.zip')) throw new Error("That file isn't a zip.");
+  const world = createWorld({
+    name: filename.replace(/\.zip$/i, ''),
+    levelType: 'minecraft:normal',
+    seed: String(Math.floor(Math.random() * 1e12)),
+    generateStructures: true,
+    difficulty: 'normal',
+    gamemode: 'survival',
+    hardcore: false,
+    maxWorldSize: 29_999_984,
+    allowNether: true,
+  });
+  world.generated = true;
+  world.dataVersion = 4189;
+  world.savedWith = '1.21.4';
+  return world;
+}
+
+export function getAllBackups(): Backup[] {
+  return [...worlds.values()]
+    .flatMap((entry) => entry.backups.backups)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getSettings(): AppSettings {
+  return { ...settings };
+}
+
+export function updateSettings(body: UpdateSettingsRequest): AppSettings {
+  if (body.publicAddress !== undefined) settings.publicAddress = body.publicAddress.trim();
+  if (body.defaultJavaArgs !== undefined) settings.defaultJavaArgs = body.defaultJavaArgs.trim();
+  if (body.curseforgeApiKey !== undefined) {
+    if (/\s/.test(body.curseforgeApiKey.trim())) throw new Error("That doesn't look like a CurseForge API key.");
+    settings.curseforgeKeySet = body.curseforgeApiKey.trim() !== '';
+    demoContent.setCurseforgeKey(settings.curseforgeKeySet);
+  }
+  return getSettings();
+}
+
+const DEMO_USER: UserInfo = { id: 'user-demo', username: 'demo', displayName: 'Demo Admin', admin: true };
+let demoEula = true;
+
+export function getMe(): Me {
+  return { user: DEMO_USER, eulaAccepted: demoEula, auth: { mode: 'dev', issuer: null, clientId: null } };
+}
+
+export function updateMe(body: UpdateMeRequest): Me {
+  if (body.eulaAccepted !== undefined) demoEula = body.eulaAccepted;
+  return getMe();
+}
+
+export function getUsers(): UserSummary[] {
+  return [
+    {
+      user: DEMO_USER,
+      eulaAccepted: demoEula,
+      worlds: worlds.size,
+      profiles: profiles.size,
+      instances: instances.size,
+      lastSeenAt: iso(),
+    },
+  ];
+}
+
+export function getSystem(): SystemInfo {
+  const status = [...instances.values()][0]?.status;
+  return {
+    version: 'demo',
+    runtime: { kind: 'demo', available: true, version: null, message: 'In-browser demo data. Nothing runs.' },
+    providers: 'demo',
+    dataDir: '(in memory)',
+    dataDirBytes: 0,
+    host: status?.host ?? {
+      cpuPercent: 0,
+      cpuCores: 8,
+      diskUsedBytes: 0,
+      diskTotalBytes: 0,
+      swapUsedBytes: 0,
+      swapTotalBytes: 0,
+    },
+  };
+}

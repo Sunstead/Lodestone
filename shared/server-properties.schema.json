@@ -1,0 +1,707 @@
+{
+  "$comment": "Single source of server.properties field metadata. Read by the Rust backend (include_str!) and the frontend demo backend. Each key is owned by exactly one scope.",
+  "groups": {
+    "world": [
+      {
+        "id": "identity",
+        "label": "Identity",
+        "hint": "Folder on disk"
+      },
+      {
+        "id": "generation",
+        "label": "Generation",
+        "hint": "Locked once generated"
+      },
+      {
+        "id": "dimensions",
+        "label": "Dimensions",
+        "hint": "Nether and beyond"
+      },
+      {
+        "id": "gameplay",
+        "label": "Gameplay",
+        "hint": "Rules for this world"
+      },
+      {
+        "id": "spawn",
+        "label": "Spawning",
+        "hint": "Where things appear"
+      },
+      {
+        "id": "datapacks",
+        "label": "Data packs",
+        "hint": "Per-world packs"
+      }
+    ],
+    "profile": [
+      {
+        "id": "network",
+        "label": "Network",
+        "hint": "Ports and motd"
+      },
+      {
+        "id": "access",
+        "label": "Access",
+        "hint": "Whitelist and idling"
+      },
+      {
+        "id": "performance",
+        "label": "Performance",
+        "hint": "Distance and tick load"
+      },
+      {
+        "id": "rcon",
+        "label": "RCON",
+        "hint": "Remote console"
+      },
+      {
+        "id": "advanced",
+        "label": "Advanced",
+        "hint": "Everything else"
+      }
+    ],
+    "instance": [
+      {
+        "id": "network",
+        "label": "Network",
+        "hint": "Published ports"
+      }
+    ]
+  },
+  "fields": [
+    {
+      "key": "level-name",
+      "label": "World folder",
+      "scope": "world",
+      "group": "identity",
+      "description": "Folder name on disk. Taken from the world asset \u2014 change it by renaming the world.",
+      "defaultValue": "world",
+      "control": "text",
+      "readOnly": true,
+      "derivedFrom": "world.folder"
+    },
+    {
+      "key": "level-seed",
+      "label": "World seed",
+      "scope": "world",
+      "group": "generation",
+      "description": "Used only the first time the world generates.",
+      "defaultValue": "",
+      "control": "text",
+      "placeholder": "blank = random"
+    },
+    {
+      "key": "level-type",
+      "label": "World type",
+      "scope": "world",
+      "group": "generation",
+      "description": "Generation preset applied to a brand new world.",
+      "defaultValue": "minecraft:normal",
+      "control": "select",
+      "options": [
+        {
+          "value": "minecraft:normal",
+          "label": "Default"
+        },
+        {
+          "value": "minecraft:flat",
+          "label": "Flat"
+        },
+        {
+          "value": "minecraft:amplified",
+          "label": "Amplified"
+        },
+        {
+          "value": "minecraft:large_biomes",
+          "label": "Large biomes"
+        }
+      ]
+    },
+    {
+      "key": "generate-structures",
+      "label": "Generate structures",
+      "scope": "world",
+      "group": "generation",
+      "description": "Villages, strongholds, monuments and bastions.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "max-world-size",
+      "label": "World border",
+      "scope": "world",
+      "group": "generation",
+      "description": "Diameter of the world border in blocks.",
+      "defaultValue": "29999984",
+      "control": "number",
+      "min": 1000,
+      "max": 29999984,
+      "unit": "blocks"
+    },
+    {
+      "key": "allow-nether",
+      "label": "Allow Nether",
+      "scope": "world",
+      "group": "dimensions",
+      "description": "Create and permit travel to this world\u2019s Nether.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "difficulty",
+      "label": "Difficulty",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Hostile mob damage, hunger and health regen.",
+      "defaultValue": "normal",
+      "control": "select",
+      "options": [
+        {
+          "value": "peaceful",
+          "label": "Peaceful"
+        },
+        {
+          "value": "easy",
+          "label": "Easy"
+        },
+        {
+          "value": "normal",
+          "label": "Normal"
+        },
+        {
+          "value": "hard",
+          "label": "Hard"
+        }
+      ],
+      "appliesLive": true
+    },
+    {
+      "key": "gamemode",
+      "label": "Default gamemode",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Game mode given to players the first time they join.",
+      "defaultValue": "survival",
+      "control": "select",
+      "options": [
+        {
+          "value": "survival",
+          "label": "Survival"
+        },
+        {
+          "value": "creative",
+          "label": "Creative"
+        },
+        {
+          "value": "adventure",
+          "label": "Adventure"
+        },
+        {
+          "value": "spectator",
+          "label": "Spectator"
+        }
+      ],
+      "appliesLive": true
+    },
+    {
+      "key": "hardcore",
+      "label": "Hardcore",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Deaths ban the player and lock the world in spectator mode.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "force-gamemode",
+      "label": "Force gamemode",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Reset every join to the default gamemode instead of restoring the last one.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "pvp",
+      "label": "Player vs player",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Players may damage each other.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "allow-flight",
+      "label": "Allow flight",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Tolerate clients that fly (Creative, elytra, modded). Off can trigger anticheat kicks.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "enable-command-block",
+      "label": "Command blocks",
+      "scope": "world",
+      "group": "gameplay",
+      "description": "Allow command blocks to execute commands.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "spawn-protection",
+      "label": "Spawn protection",
+      "scope": "world",
+      "group": "spawn",
+      "description": "Radius around spawn where only ops may break blocks. 0 turns it off.",
+      "defaultValue": "16",
+      "control": "number",
+      "min": 0,
+      "max": 1000,
+      "unit": "blocks"
+    },
+    {
+      "key": "spawn-monsters",
+      "label": "Hostile mobs",
+      "scope": "world",
+      "group": "spawn",
+      "description": "Hostile mobs spawn in the dark.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "spawn-npcs",
+      "label": "NPCs",
+      "scope": "world",
+      "group": "spawn",
+      "description": "Villagers and other NPCs spawn naturally.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "initial-enabled-packs",
+      "label": "Enabled data packs",
+      "scope": "world",
+      "group": "datapacks",
+      "description": "Data packs enabled the first time the world loads.",
+      "defaultValue": "vanilla",
+      "control": "text"
+    },
+    {
+      "key": "initial-disabled-packs",
+      "label": "Disabled data packs",
+      "scope": "world",
+      "group": "datapacks",
+      "description": "Data packs shipped in the world folder but left off.",
+      "defaultValue": "",
+      "control": "text"
+    },
+    {
+      "key": "motd",
+      "label": "Message of the day",
+      "scope": "profile",
+      "group": "network",
+      "description": "Shown in the multiplayer list. Supports \u00a7 colour codes.",
+      "defaultValue": "A Minecraft Server",
+      "control": "text",
+      "placeholder": "\u00a7aMy Server \u00a77| \u00a7fWelcome"
+    },
+    {
+      "key": "max-players",
+      "label": "Max players",
+      "scope": "profile",
+      "group": "network",
+      "description": "Player slots advertised in the server list ping. Does not kick anyone already online.",
+      "defaultValue": "20",
+      "control": "number",
+      "min": 1,
+      "max": 1000
+    },
+    {
+      "key": "online-mode",
+      "label": "Online mode",
+      "scope": "profile",
+      "group": "network",
+      "description": "Authenticate names against Mojang sessions. Disable only when a proxy handles auth.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "white-list",
+      "label": "Whitelist",
+      "scope": "profile",
+      "group": "access",
+      "description": "Only whitelisted players may join. Manage the list in the Players tab.",
+      "defaultValue": "false",
+      "control": "switch",
+      "appliesLive": true
+    },
+    {
+      "key": "enforce-whitelist",
+      "label": "Enforce whitelist",
+      "scope": "profile",
+      "group": "access",
+      "description": "Kick players who are removed from the whitelist while online.",
+      "defaultValue": "false",
+      "control": "switch",
+      "appliesLive": true
+    },
+    {
+      "key": "hide-online-players",
+      "label": "Hide player list",
+      "scope": "profile",
+      "group": "access",
+      "description": "Do not reveal the online player list to server list pings.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "player-idle-timeout",
+      "label": "Idle timeout",
+      "scope": "profile",
+      "group": "access",
+      "description": "Kick players idle for this long. 0 never kicks.",
+      "defaultValue": "0",
+      "control": "number",
+      "min": 0,
+      "max": 43200,
+      "unit": "min",
+      "appliesLive": true
+    },
+    {
+      "key": "enable-query",
+      "label": "Query protocol",
+      "scope": "profile",
+      "group": "network",
+      "description": "Answer GameSpy4 query pings on the query port (used by server list scrapers).",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "query.port",
+      "label": "Query port",
+      "scope": "profile",
+      "group": "network",
+      "description": "UDP port for the query protocol. Set on the instance.",
+      "defaultValue": "25565",
+      "control": "number",
+      "min": 1,
+      "max": 65535,
+      "readOnly": true,
+      "derivedFrom": "instance.ports.query"
+    },
+    {
+      "key": "view-distance",
+      "label": "View distance",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Chunks sent to each client. The heaviest lever for CPU and bandwidth.",
+      "defaultValue": "10",
+      "control": "slider",
+      "min": 2,
+      "max": 32,
+      "step": 1,
+      "unit": "chunks"
+    },
+    {
+      "key": "simulation-distance",
+      "label": "Simulation distance",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Chunks where mobs, crops and redstone actually tick.",
+      "defaultValue": "8",
+      "control": "slider",
+      "min": 2,
+      "max": 32,
+      "step": 1,
+      "unit": "chunks"
+    },
+    {
+      "key": "max-tick-time",
+      "label": "Tick watchdog",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Warn when one tick runs longer than this. -1 disables the watchdog.",
+      "defaultValue": "60000",
+      "control": "number",
+      "min": -1,
+      "max": 600000,
+      "unit": "ms"
+    },
+    {
+      "key": "max-chained-neighbor-updates",
+      "label": "Chained updates",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Cap on block updates per tick, limits piston and observer loops.",
+      "defaultValue": "100000",
+      "control": "number",
+      "min": 1000,
+      "max": 1000000
+    },
+    {
+      "key": "network-compression-threshold",
+      "label": "Compression threshold",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Compress packets larger than this. 0 disables compression.",
+      "defaultValue": "256",
+      "control": "number",
+      "min": 0,
+      "max": 65536,
+      "unit": "bytes"
+    },
+    {
+      "key": "sync-chunk-writes",
+      "label": "Sync chunk writes",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Flush chunks to disk synchronously. Faster off, safer on.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "use-native-transport",
+      "label": "Native transport",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Linux only: use epoll for lower latency networking.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "rate-limit",
+      "label": "Rate limit",
+      "scope": "profile",
+      "group": "performance",
+      "description": "Drop packets from clients sending faster than this. 0 disables it.",
+      "defaultValue": "0",
+      "control": "number",
+      "min": 0,
+      "max": 100000,
+      "unit": "pkt/s"
+    },
+    {
+      "key": "entity-broadcast-range-percentage",
+      "label": "Broadcast range",
+      "scope": "profile",
+      "group": "performance",
+      "description": "How far entity updates reach clients. 100 matches the vanilla view radius.",
+      "defaultValue": "100",
+      "control": "number",
+      "min": 10,
+      "max": 1000,
+      "unit": "%"
+    },
+    {
+      "key": "enable-rcon",
+      "label": "Enable RCON",
+      "scope": "profile",
+      "group": "rcon",
+      "description": "Expose RCON so Lodestone can send commands and read responses. Always on: Lodestone uses RCON for the console, player actions and safe backups.",
+      "defaultValue": "true",
+      "control": "switch",
+      "readOnly": true,
+      "derivedFrom": "lodestone"
+    },
+    {
+      "key": "rcon.port",
+      "label": "RCON port",
+      "scope": "profile",
+      "group": "rcon",
+      "description": "Published on loopback only \u2014 never reachable from the internet. Published on 127.0.0.1 only. Change it on the instance.",
+      "defaultValue": "25575",
+      "control": "number",
+      "min": 1,
+      "max": 65535,
+      "readOnly": true,
+      "derivedFrom": "instance.ports.rcon"
+    },
+    {
+      "key": "rcon.password",
+      "label": "RCON password",
+      "scope": "profile",
+      "group": "rcon",
+      "description": "Shared with Lodestone and stored in SQLite. Never written to logs. Generated per instance and never shown.",
+      "defaultValue": "",
+      "control": "password",
+      "sensitive": true,
+      "placeholder": "auto-generated",
+      "readOnly": true,
+      "derivedFrom": "lodestone"
+    },
+    {
+      "key": "broadcast-rcon-to-ops",
+      "label": "Broadcast RCON commands",
+      "scope": "profile",
+      "group": "rcon",
+      "description": "Show commands sent over RCON to online ops.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "broadcast-console-to-ops",
+      "label": "Broadcast console commands",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Show console commands to online ops.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "enforce-secure-profile",
+      "label": "Chat signing",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Enforce Mojang chat signing. Unsigned messages are rejected.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "prevent-proxy-connections",
+      "label": "Block proxies",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Reject connections from known proxy IP ranges.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "honor-proxy-ips",
+      "label": "Honour proxy IPs",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Trust forwarded IPs from a proxy sitting in front of the server.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "log-ips",
+      "label": "Log player IPs",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Write connecting addresses into the log file.",
+      "defaultValue": "true",
+      "control": "switch"
+    },
+    {
+      "key": "enable-jmx-monitoring",
+      "label": "JMX monitoring",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Expose JVM metrics on localhost:9010.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "track-random-splits",
+      "label": "Track random splits",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Log RNG splits so bug reports can be reproduced.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "text-filtering-config",
+      "label": "Text filtering config",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "File used to filter chat text. Blank disables filtering.",
+      "defaultValue": "",
+      "control": "text"
+    },
+    {
+      "key": "bug-report-link",
+      "label": "Bug report link",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Shown to players when they file a crash report.",
+      "defaultValue": "",
+      "control": "text"
+    },
+    {
+      "key": "function-permission-level",
+      "label": "Function permission level",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Permission level for functions and command block functions.",
+      "defaultValue": "2",
+      "control": "number",
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "operator-user-permission-level",
+      "label": "Op permission level",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Permission level granted when a player is made op in game.",
+      "defaultValue": "4",
+      "control": "number",
+      "min": 0,
+      "max": 4
+    },
+    {
+      "key": "require-resource-pack",
+      "label": "Require resource pack",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Kick players who decline the resource pack.",
+      "defaultValue": "false",
+      "control": "switch"
+    },
+    {
+      "key": "resource-pack",
+      "label": "Resource pack URL",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "HTTPS URL of the pack pushed to clients on join.",
+      "defaultValue": "",
+      "control": "text"
+    },
+    {
+      "key": "resource-pack-prompt",
+      "label": "Resource pack prompt",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Message shown when asking players to download the pack.",
+      "defaultValue": "",
+      "control": "text"
+    },
+    {
+      "key": "resource-pack-sha1",
+      "label": "Resource pack SHA-1",
+      "scope": "profile",
+      "group": "advanced",
+      "description": "Hash of the pack. Required for modern clients to accept it.",
+      "defaultValue": "",
+      "control": "text"
+    },
+    {
+      "key": "server-port",
+      "label": "Server port",
+      "scope": "instance",
+      "group": "network",
+      "description": "TCP port players connect to. Mapped into the container. Set on the instance; mapped into the container.",
+      "defaultValue": "25565",
+      "control": "number",
+      "min": 1,
+      "max": 65535,
+      "readOnly": true,
+      "derivedFrom": "instance.ports.minecraft"
+    },
+    {
+      "key": "server-ip",
+      "label": "Bind address",
+      "scope": "instance",
+      "group": "network",
+      "description": "Interface the server binds to. Leave blank to bind every interface. Containers always bind every interface; the published port decides exposure.",
+      "defaultValue": "",
+      "control": "text",
+      "placeholder": "blank = all interfaces",
+      "readOnly": true,
+      "derivedFrom": "lodestone"
+    }
+  ]
+}

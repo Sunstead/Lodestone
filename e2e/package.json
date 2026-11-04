@@ -1,0 +1,13 @@
+{
+  "name": "lodestone-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:demo": "playwright test --project=demo",
+    "test:fake": "playwright test --project=fake"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  }
+}

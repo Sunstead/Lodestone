@@ -31,6 +31,11 @@ generateStructures: boolean,
  */
 generated: boolean, layout: WorldLayout, 
 /**
- * `DataVersion` from level.dat once generated. Guards downgrades.
+ * `DataVersion` from level.dat once generated.
  */
-dataVersion: number | null, maxWorldSize: number, allowNether: boolean, difficulty: Difficulty, gamemode: GameMode, hardcore: boolean, spawnProtection: number, spawnMonsters: boolean, spawnNpcs: boolean, pvp: boolean, allowFlight: boolean, enableCommandBlock: boolean, dataPacks: DataPacks, sizeBytes: number, createdAt: string, updatedAt: string, attachedInstanceId: string | null, };
+dataVersion: number | null, 
+/**
+ * The Minecraft version that last saved it (level.dat). Opening it with
+ * an older one is refused, since that can corrupt chunks.
+ */
+savedWith: string | null, maxWorldSize: number, allowNether: boolean, difficulty: Difficulty, gamemode: GameMode, hardcore: boolean, spawnProtection: number, spawnMonsters: boolean, spawnNpcs: boolean, pvp: boolean, allowFlight: boolean, enableCommandBlock: boolean, dataPacks: DataPacks, sizeBytes: number, createdAt: string, updatedAt: string, attachedInstanceId: string | null, };

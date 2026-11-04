@@ -1,5 +1,7 @@
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::{Multipart, Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use crate::app::AppState;
@@ -35,6 +37,7 @@ pub fn new_world(req: CreateWorldRequest) -> AppResult<World> {
         generated: false,
         layout: WorldLayout::Vanilla,
         data_version: None,
+        saved_with: None,
         max_world_size: req.max_world_size,
         allow_nether: req.allow_nether,
         difficulty: req.difficulty,
@@ -222,9 +225,22 @@ pub async fn status(
         .await
         .map_err(anyhow::Error::from)?
     };
-    let time = match &world.attached_instance_id {
+    let live_time = match &world.attached_instance_id {
         Some(instance) => supervisor::world_time(&app, instance).await,
         None => None,
+    };
+    // Offline (or no RCON): the day as last saved.
+    let time = match live_time {
+        Some(time) => Some(time),
+        None => {
+            let path = app.paths.world(&id).join(&world.folder).join("level.dat");
+            tokio::task::spawn_blocking(move || crate::level::read(&path))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|info| info.day_time)
+                .map(|ticks| (ticks / 24_000, crate::logparse::daytime_label(ticks)))
+        }
     };
     let players = app.store.world_players(&id).await?;
     Ok(Json(WorldStatus {
@@ -237,6 +253,130 @@ pub async fn status(
         player_count: players.len() as u32,
         last_played_at: players.iter().map(|player| player.last_seen.clone()).max(),
     }))
+}
+
+/* ---------------------------- import / export --------------------------- */
+
+/// Streams a multipart upload's first file to disk: worlds can be gigabytes.
+async fn upload_to_disk(app: &AppState, mut multipart: Multipart) -> AppResult<(String, std::path::PathBuf)> {
+    use tokio::io::AsyncWriteExt;
+    while let Some(mut field) = multipart.next_field().await.map_err(|err| AppError::bad_request(err.body_text()))? {
+        let Some(name) = field.file_name().map(str::to_owned) else { continue };
+        let path = app.paths.tmp().join(new_id("upload"));
+        let mut file = tokio::fs::File::create(&path).await?;
+        while let Some(chunk) = field.chunk().await.map_err(|err| AppError::bad_request(err.body_text()))? {
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        return Ok((name, path));
+    }
+    Err(AppError::bad_request("Attach a world .zip."))
+}
+
+/// Imports a zipped world (a singleplayer save, or a server's world folder).
+pub async fn import(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    multipart: Multipart,
+) -> AppResult<(StatusCode, Json<World>)> {
+    let (filename, upload) = upload_to_disk(&app, multipart).await?;
+    let id = new_id("world");
+    let universe = app.paths.world(&id);
+    let staging = universe.clone();
+    let unpacked = tokio::task::spawn_blocking(move || {
+        crate::worldfiles::import_zip(&upload, &staging, "world").inspect(|_| {
+            let _ = std::fs::remove_file(&upload);
+        })
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+    let (info, layout) = match unpacked {
+        Ok(found) => found,
+        Err(err) => {
+            let _ = tokio::fs::remove_dir_all(&universe).await;
+            return Err(err);
+        }
+    };
+    let stem = filename.trim_end_matches(".zip").trim_end_matches(".ZIP");
+    let name = info.level_name.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| stem.to_owned());
+    let mut world = new_world(CreateWorldRequest {
+        name: name.clone(),
+        level_type: crate::model::LevelType::Normal,
+        seed: info.seed.map(|seed| seed.to_string()),
+        generate_structures: true,
+        difficulty: match info.difficulty {
+            Some(0) => crate::model::Difficulty::Peaceful,
+            Some(1) => crate::model::Difficulty::Easy,
+            Some(3) => crate::model::Difficulty::Hard,
+            _ => crate::model::Difficulty::Normal,
+        },
+        gamemode: match info.game_type {
+            Some(1) => crate::model::GameMode::Creative,
+            Some(2) => crate::model::GameMode::Adventure,
+            Some(3) => crate::model::GameMode::Spectator,
+            _ => crate::model::GameMode::Survival,
+        },
+        hardcore: info.hardcore.unwrap_or(false),
+        max_world_size: MAX_WORLD_SIZE,
+        allow_nether: true,
+    })?;
+    world.id = id.clone();
+    // The files were unpacked as `world`; rename to the world's folder name.
+    if world.folder != "world" {
+        for suffix in ["", "_nether", "_the_end"] {
+            let from = universe.join(format!("world{suffix}"));
+            if from.exists() {
+                tokio::fs::rename(&from, universe.join(format!("{}{suffix}", world.folder))).await?;
+            }
+        }
+    }
+    world.generated = true;
+    world.layout = layout;
+    world.data_version = info.data_version;
+    world.saved_with = info.version_name;
+    world.size_bytes = tokio::task::spawn_blocking(move || dir_size(&universe)).await.unwrap_or(0);
+    app.store.insert_world(&world, &user.id).await?;
+    app.events.changed(ResourceKind::Worlds, Some(world.id.clone()));
+    Ok((StatusCode::CREATED, Json(world)))
+}
+
+/// The world as a zip, ready for singleplayer or another server.
+pub async fn download(State(app): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> AppResult<Response> {
+    user.check(&app.store, Asset::World, &id).await?;
+    let world = app.store.get_world(&id).await?;
+    let running = world
+        .attached_instance_id
+        .as_ref()
+        .filter(|instance| app.instances.slot(instance).state() == ServerState::Running)
+        .cloned();
+    if let Some(instance) = &running {
+        // A consistent copy: flush, and hold autosave while zipping.
+        let slot = app.instances.slot(instance);
+        let _ = supervisor::rcon(&slot, "save-off").await;
+        let _ = supervisor::rcon(&slot, "save-all flush").await;
+    }
+    let out = app.paths.tmp().join(format!("{}.zip", new_id("export")));
+    let (universe, folder, target) = (app.paths.world(&id), world.folder.clone(), out.clone());
+    let zipped = tokio::task::spawn_blocking(move || crate::worldfiles::export_zip(&universe, &folder, &target)).await;
+    if let Some(instance) = &running {
+        let _ = supervisor::rcon(&app.instances.slot(instance), "save-on").await;
+    }
+    zipped.map_err(anyhow::Error::from)??;
+    let file = tokio::fs::File::open(&out).await?;
+    let length = file.metadata().await?.len();
+    // Unlinked now; the open handle keeps streaming it.
+    let _ = tokio::fs::remove_file(&out).await;
+    let body = Body::from_stream(tokio_util::io::ReaderStream::new(file));
+    let name = format!("{}.zip", slugify(&world.name));
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_owned()),
+            (header::CONTENT_LENGTH, length.to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /* -------------------------------- backups ------------------------------- */

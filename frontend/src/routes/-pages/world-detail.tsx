@@ -19,6 +19,7 @@ import { Separator } from '@sunstead/ui/components/separator';
 import { Skeleton } from '@sunstead/ui/components/skeleton';
 import { Switch } from '@sunstead/ui/components/switch';
 import { useInstances, useUpdateWorld, useWorld, useWorldStatus } from '#/api/queries';
+import { worldDownloadUrl } from '#/api/client';
 import type { Difficulty, GameMode, LevelType, World } from '#/api/types';
 import { KeyValue, SectionHeading, StatStrip } from '#/components/page-parts';
 import { BackupsPanel } from '#/routes/-pages/backups-panel';
@@ -27,6 +28,7 @@ import { formatBytes, formatNumber, formatRelative } from '#/lib/format';
 import {
   Blocks,
   Container,
+  Download,
   Database,
   Gamepad2,
   Globe,
@@ -267,7 +269,7 @@ export function WorldDetailPage({
           {
             label: 'In-game day',
             value: live?.day != null ? formatNumber(live.day) : '—',
-            hint: live?.timeOfDay ?? (live?.attached ? undefined : 'Shown while the world runs'),
+            hint: live?.timeOfDay ?? (data.generated ? undefined : 'Once the world has generated'),
           },
           {
             label: 'Players',
@@ -488,6 +490,10 @@ export function WorldDetailPage({
               <div className='divide-y'>
                 <KeyValue label='Generated' value={data.generated ? 'Yes' : 'Not yet — generates on first start'} />
                 <KeyValue
+                  label='Last saved by'
+                  value={data.savedWith ? `Minecraft ${data.savedWith}` : '—'}
+                />
+                <KeyValue
                   label='Layout'
                   value={data.layout === 'bukkit' ? 'Paper (dimensions in sibling folders)' : 'Vanilla (one folder)'}
                 />
@@ -500,6 +506,20 @@ export function WorldDetailPage({
                   ? 'A server is running this world right now.'
                   : 'No server has it mounted; the data sits safely on disk.'}
               </p>
+              {data.savedWith ? (
+                <p className='text-xs text-muted-foreground'>
+                  Servers on an older Minecraft version than {data.savedWith} won't open it, since that can corrupt chunks.
+                </p>
+              ) : null}
+              {worldDownloadUrl(data.id) ? (
+                <Button variant='outline' size='sm' className='w-full' render={<a href={worldDownloadUrl(data.id)!} download />}>
+                  <Download /> Download as .zip
+                </Button>
+              ) : (
+                <Button variant='outline' size='sm' className='w-full' disabled>
+                  <Download /> Download as .zip (not in the demo)
+                </Button>
+              )}
             </CardContent>
           </Card>
         </div>

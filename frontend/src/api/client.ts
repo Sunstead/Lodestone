@@ -202,6 +202,11 @@ export const duplicateWorld = (id: string): Promise<World> =>
   live() ? request(`/worlds/${id}/duplicate`, post()) : local(() => demo.duplicateWorld(id));
 export const deleteWorld = (id: string): Promise<void> =>
   live() ? request(`/worlds/${id}`, del) : local(() => demo.deleteWorld(id));
+/** Imports a zipped world (a singleplayer save or a server's world folder). */
+export const importWorld = (file: File): Promise<World> =>
+  live() ? request('/worlds/import', { method: 'POST', body: fileBody(file) }) : local(() => demo.importWorld(file.name));
+/** Where the browser downloads a world's zip from; `null` in demo mode. */
+export const worldDownloadUrl = (id: string): string | null => (live() ? `${BASE}/worlds/${id}/download` : null);
 export const getWorldStatus = (id: string): Promise<WorldStatus> =>
   live() ? request(`/worlds/${id}/status`) : local(() => demo.getWorldStatus(id));
 

@@ -218,7 +218,19 @@ impl Sim {
         if let Some(dir) = &world_dir {
             // Leave something on disk, like a freshly generated world would.
             let _ = std::fs::create_dir_all(dir.join("region"));
-            let _ = std::fs::write(dir.join("level.dat"), b"fake level.dat");
+            // A real (if tiny) level.dat, keeping the day it had reached.
+            let previous = crate::level::read(&dir.join("level.dat"));
+            let info = crate::level::LevelInfo {
+                data_version: Some(4189),
+                version_name: Some(self.version.clone()),
+                level_name: Some(self.level.clone()),
+                seed: previous.as_ref().and_then(|p| p.seed).or(Some(-4_172_144_997_902_289_642)),
+                day_time: Some(previous.as_ref().and_then(|p| p.day_time).unwrap_or(0) + 30_000),
+                game_type: Some(0),
+                difficulty: Some(2),
+                hardcore: Some(false),
+            };
+            let _ = std::fs::write(dir.join("level.dat"), crate::level::write(&info));
             let _ = std::fs::write(dir.join("region").join("r.0.0.mca"), vec![0u8; 64 * 1024]);
         }
         if shutdown.borrow().is_none() {

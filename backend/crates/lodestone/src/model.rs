@@ -210,8 +210,12 @@ pub struct World {
     /// Whether the world has ever generated; locks the fields above.
     pub generated: bool,
     pub layout: WorldLayout,
-    /// `DataVersion` from level.dat once generated. Guards downgrades.
+    /// `DataVersion` from level.dat once generated.
     pub data_version: Option<i32>,
+    /// The Minecraft version that last saved it (level.dat). Opening it with
+    /// an older one is refused, since that can corrupt chunks.
+    #[serde(default)]
+    pub saved_with: Option<String>,
     pub max_world_size: u32,
     pub allow_nether: bool,
     pub difficulty: Difficulty,

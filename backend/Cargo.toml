@@ -30,6 +30,7 @@ tar = "0.4"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = { version = "0.1", features = ["sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "fs"] }
@@ -38,6 +39,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 uuid = { version = "1", features = ["v7"] }
 zstd = "0.13"
+fastnbt = "2"
+flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 url = "2"
 base64 = "0.22"

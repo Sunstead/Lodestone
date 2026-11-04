@@ -44,6 +44,8 @@ pub fn router(state: AppState) -> Router {
         // worlds
         .route("/worlds", get(worlds::list).post(worlds::create))
         .route("/worlds/{id}", get(worlds::get).patch(worlds::update).delete(worlds::delete))
+        .route("/worlds/import", post(worlds::import).layer(DefaultBodyLimit::max(64 << 30)))
+        .route("/worlds/{id}/download", get(worlds::download))
         .route("/worlds/{id}/duplicate", post(worlds::duplicate))
         .route("/worlds/{id}/status", get(worlds::status))
         .route("/worlds/{id}/backups", get(worlds::backups).post(worlds::create_backup))

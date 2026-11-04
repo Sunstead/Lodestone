@@ -258,6 +258,18 @@ fn start_boxed(
 
 /// Refuses combinations that would damage a world.
 pub fn check_world_compatible(world: &World, profile: &ProfileRecord) -> AppResult<()> {
+    if let Some(saved) = &world.saved_with {
+        let version = &profile.profile.version;
+        if crate::logparse::version_at_least(version, saved) == Some(false) {
+            return Err(AppError::conflict(
+                "world_newer",
+                format!(
+                    "\"{}\" was last saved by Minecraft {saved}. Opening it with {version} could corrupt it. Use a configuration on {saved} or newer, or restore a backup from before the upgrade.",
+                    world.name
+                ),
+            ));
+        }
+    }
     let wants = profile.profile.software_id.world_layout();
     if world.generated && world.layout == WorldLayout::Bukkit && wants == WorldLayout::Vanilla {
         return Err(AppError::conflict(
@@ -561,6 +573,32 @@ async fn remember_uuid(app: &AppState, slot: &Slot, name: &str, uuid: &str) {
     }
 }
 
+/// Records what level.dat says: which version last saved the world, and the
+/// seed a random-seed world turned out to have.
+pub async fn refresh_level(app: &AppState, world_id: &str) {
+    let Ok(mut world) = app.store.get_world(world_id).await else { return };
+    let path = app.paths.world(world_id).join(&world.folder).join("level.dat");
+    let Ok(Some(info)) = tokio::task::spawn_blocking(move || crate::level::read(&path)).await else { return };
+    let mut changed = false;
+    if info.data_version.is_some() && info.data_version != world.data_version {
+        world.data_version = info.data_version;
+        changed = true;
+    }
+    if info.version_name.is_some() && info.version_name != world.saved_with {
+        world.saved_with = info.version_name;
+        changed = true;
+    }
+    if world.seed.is_none() {
+        if let Some(seed) = info.seed {
+            world.seed = Some(seed.to_string());
+            changed = true;
+        }
+    }
+    if changed && app.store.update_world(&world).await.is_ok() {
+        app.events.changed(ResourceKind::Worlds, Some(world.id));
+    }
+}
+
 async fn on_running(app: &AppState, slot: &Arc<Slot>) {
     let world_id = slot.live.lock().unwrap().world_id.clone();
     if let Ok(mut world) = app.store.get_world(&world_id).await {
@@ -578,6 +616,7 @@ async fn on_running(app: &AppState, slot: &Arc<Slot>) {
         let _ = app.store.update_world(&world).await;
         app.events.changed(ResourceKind::Worlds, Some(world.id));
     }
+    refresh_level(app, &world_id).await;
 
     match connect_rcon(slot).await {
         Ok(()) => {
@@ -732,6 +771,7 @@ async fn on_exit(app: &AppState, slot: &Arc<Slot>, container_id: &str, code: i64
     }
     let _ = app.runtime.remove(container_id).await;
     refresh_world_size(app, &world_id).await;
+    refresh_level(app, &world_id).await;
 
     if stop_requested || code == 0 {
         slot.note(LogLevel::Info, "Server stopped.");

@@ -58,8 +58,13 @@ impl Paths {
         self.root.join("backups")
     }
 
+    /// Uploads and exports in progress.
+    pub fn tmp(&self) -> PathBuf {
+        self.root.join("tmp")
+    }
+
     pub fn ensure(&self) -> std::io::Result<()> {
-        for dir in ["cache/blobs", "cache/installs", "worlds", "profiles", "instances", "backups"] {
+        for dir in ["cache/blobs", "cache/installs", "worlds", "profiles", "instances", "backups", "tmp"] {
             std::fs::create_dir_all(self.root.join(dir))?;
         }
         Ok(())

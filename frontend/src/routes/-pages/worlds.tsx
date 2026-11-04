@@ -52,6 +52,7 @@ import {
   useDuplicateWorld,
   useInstances,
   useWorlds,
+  useImportWorld,
 } from '#/api/queries';
 import type { CreateWorldRequest, Difficulty, GameMode, Instance, LevelType, World } from '#/api/types';
 import { EmptyState, ScrollTable, SectionHeading } from '#/components/page-parts';
@@ -68,7 +69,8 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { FolderInput, Loader2 } from 'lucide-react';
 
 const LEVEL_TYPES: { value: LevelType; label: string }[] = [
   { value: 'minecraft:normal', label: 'Normal' },
@@ -359,6 +361,8 @@ export function WorldsPage({
 }) {
   const worlds = useWorlds();
   const instances = useInstances();
+  const importWorld = useImportWorld();
+  const zipInput = useRef<HTMLInputElement>(null);
   const duplicate = useDuplicateWorld();
   const remove = useDeleteWorld();
   const [createOpen, setCreateOpen] = useState(false);
@@ -395,12 +399,34 @@ export function WorldsPage({
         icon={Layers}
         description={`${list.length} world${list.length === 1 ? '' : 's'} · ${totals.attached} mounted · ${formatBytes(totals.bytes, 1)} on disk`}
         action={
-          <BevelButton className='px-5 py-5 text-base' onClick={() => setCreateOpen(true)}>
-            <Plus />
-            Create world
-          </BevelButton>
+          <>
+            <Button variant='outline' disabled={importWorld.isPending} onClick={() => zipInput.current?.click()}>
+              {importWorld.isPending ? <Loader2 className='animate-spin' /> : <FolderInput />}
+              {importWorld.isPending ? 'Importing…' : 'Import world'}
+            </Button>
+            <input
+              ref={zipInput}
+              type='file'
+              accept='.zip'
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) importWorld.mutate(file, { onSuccess: (world) => onOpenWorld(world.id) });
+                event.target.value = '';
+              }}
+            />
+            <BevelButton className='px-5 py-5 text-base' onClick={() => setCreateOpen(true)}>
+              <Plus />
+              Create world
+            </BevelButton>
+          </>
         }
       />
+      {importWorld.error ? (
+        <p role='alert' className='text-sm text-destructive'>
+          {importWorld.error.message}
+        </p>
+      ) : null}
 
       {list.length === 0 ? (
         <Card>

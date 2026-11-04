@@ -183,6 +183,14 @@ export function useAllBackups(): UseQueryResult<Backup[]> {
 
 /* -------------------------------- worlds ------------------------------- */
 
+export function useImportWorld(): UseMutationResult<World, Error, File> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.importWorld,
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.worlds }),
+  });
+}
+
 export function useWorlds(): UseQueryResult<World[]> {
   return useQuery({ queryKey: keys.worlds, queryFn: api.listWorlds, refetchInterval: 30_000 });
 }

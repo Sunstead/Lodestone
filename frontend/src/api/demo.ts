@@ -966,6 +966,7 @@ function hydrateWorld(seed: WorldSeed): void {
       ? 'bukkit'
       : 'vanilla',
     dataVersion: seed.generated ? 4189 : null,
+    savedWith: seed.generated ? '1.21.4' : null,
     maxWorldSize: seed.maxWorldSize,
     allowNether: seed.allowNether,
     difficulty: seed.difficulty,
@@ -1243,6 +1244,7 @@ export function createWorld(request: CreateWorldRequest): World {
     generated: false,
     layout: 'vanilla',
     dataVersion: null,
+    savedWith: null,
     maxWorldSize: request.maxWorldSize,
     allowNether: request.allowNether,
     difficulty: request.difficulty,
@@ -2230,6 +2232,26 @@ const settings: AppSettings = {
   publicAddress: '',
   defaultJavaArgs: '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200',
 };
+
+/** The demo can't read zips: it adds a generated world named after the file. */
+export function importWorld(filename: string): World {
+  if (!filename.toLowerCase().endsWith('.zip')) throw new Error("That file isn't a zip.");
+  const world = createWorld({
+    name: filename.replace(/\.zip$/i, ''),
+    levelType: 'minecraft:normal',
+    seed: String(Math.floor(Math.random() * 1e12)),
+    generateStructures: true,
+    difficulty: 'normal',
+    gamemode: 'survival',
+    hardcore: false,
+    maxWorldSize: 29_999_984,
+    allowNether: true,
+  });
+  world.generated = true;
+  world.dataVersion = 4189;
+  world.savedWith = '1.21.4';
+  return world;
+}
 
 export function getAllBackups(): Backup[] {
   return [...worlds.values()]

@@ -758,3 +758,69 @@ async fn modpacks_import_as_new_configurations() {
     let config = app.state.paths.profile(&profile_id).join("config/lithium.properties");
     assert_eq!(std::fs::read_to_string(config).unwrap(), "mixin.ai=false");
 }
+
+/* ------------------------------- worlds ------------------------------- */
+
+#[tokio::test]
+async fn worlds_remember_their_version_and_refuse_downgrades() {
+    let app = TestApp::new().await;
+    let instance = app.create_instance(json!({ "start": true })).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    app.wait_state(&id, "running").await;
+    app.post(&format!("/instances/{id}/actions"), json!({ "action": "stop" })).await;
+    app.wait_state(&id, "stopped").await;
+
+    let world = app.get(&format!("/worlds/{}", instance["worldId"].as_str().unwrap())).await;
+    assert_eq!(world["savedWith"], "1.21.4");
+    assert_eq!(world["dataVersion"], 4189);
+    assert!(world["seed"].is_string(), "a random seed is filled in once known: {world}");
+
+    // Offline, the day still comes from level.dat.
+    let status = app.get(&format!("/worlds/{}/status", world["id"].as_str().unwrap())).await;
+    assert_eq!(status["day"], 1);
+    assert!(status["timeOfDay"].is_string());
+
+    let profile = instance["profileId"].as_str().unwrap();
+    let (status, _) =
+        app.call(Method::PATCH, &format!("/profiles/{profile}"), Some(json!({ "version": "1.21.1" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, err) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{err}");
+    assert_eq!(err["error"]["code"], "world_newer");
+}
+
+#[tokio::test]
+async fn worlds_import_and_download_as_zips() {
+    let app = TestApp::new().await;
+    let level = lodestone::level::write(&lodestone::level::LevelInfo {
+        data_version: Some(3955),
+        version_name: Some("1.21.1".into()),
+        level_name: Some("Old Peaks".into()),
+        seed: Some(42),
+        day_time: Some(24_000 * 7),
+        game_type: Some(1),
+        difficulty: Some(3),
+        hardcore: Some(false),
+    });
+    let world_zip = zip(&[("Old Peaks/level.dat", &level), ("Old Peaks/region/r.0.0.mca", &[1u8; 2048])]);
+    let (status, world) = upload(&app, "/worlds/import", "Old Peaks.zip", world_zip).await;
+    assert_eq!(status, StatusCode::CREATED, "{world}");
+    assert_eq!(world["name"], "Old Peaks");
+    assert_eq!(world["folder"], "old-peaks");
+    assert_eq!((world["seed"].as_str(), world["gamemode"].as_str()), (Some("42"), Some("creative")));
+    assert_eq!((world["generated"].as_bool(), world["savedWith"].as_str()), (Some(true), Some("1.21.1")));
+    let id = world["id"].as_str().unwrap();
+    assert!(app.state.paths.world(id).join("old-peaks/region/r.0.0.mca").is_file());
+
+    let request = Request::builder().uri(format!("/api/v1/worlds/{id}/download")).body(Body::empty()).unwrap();
+    let response = app.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-disposition"], "attachment; filename=\"old-peaks.zip\"");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+    let names: Vec<&str> = archive.file_names().collect();
+    assert!(names.contains(&"old-peaks/level.dat"), "{names:?}");
+
+    let (status, err) = upload(&app, "/worlds/import", "junk.zip", zip(&[("readme.txt", b"hi")])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+}

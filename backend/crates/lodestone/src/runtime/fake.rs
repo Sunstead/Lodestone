@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 
-use super::{LaunchSpec, Process, ProcessEvent, ProcessStats, Runtime};
+use super::{LaunchSpec, Process, ProcessEvent, ProcessStats, Runtime, TaskOutput, TaskSpec};
 use crate::error::{AppError, AppResult};
 use crate::jobs::JobHandle;
 use crate::model::{RuntimeInfo, ServerSoftwareId};
@@ -144,6 +144,26 @@ impl Runtime for FakeRuntime {
                 dropped: 0,
             }
         }))
+    }
+
+    /// Pretends to be a mod loader installer: `--installServer <dir>` gets
+    /// a `libraries/` tree with an args file, as Forge and NeoForge write.
+    async fn run_task(&self, task: &TaskSpec, job: &JobHandle) -> AppResult<TaskOutput> {
+        let Some(at) = task.command.iter().position(|arg| arg == "--installServer") else {
+            return Ok(TaskOutput { code: 1, tail: vec!["fake runtime: unknown task".into()] });
+        };
+        let dir = task.command.get(at + 1).and_then(|target| {
+            task.mounts.iter().find(|mount| &mount.container == target).map(|mount| mount.host.clone())
+        });
+        let Some(dir) = dir else {
+            return Ok(TaskOutput { code: 1, tail: vec!["fake runtime: install dir isn't mounted".into()] });
+        };
+        job.progress(None, "Extracting libraries").await;
+        let args = dir.join("libraries/net/lodestone/fake-loader/1.0");
+        std::fs::create_dir_all(&args)?;
+        std::fs::write(args.join("unix_args.txt"), "-cp libraries/fake.jar lodestone.FakeLoader\n")?;
+        std::fs::write(dir.join("run.sh"), "#!/bin/sh\n")?;
+        Ok(TaskOutput { code: 0, tail: vec!["The server installed successfully".into()] })
     }
 }
 

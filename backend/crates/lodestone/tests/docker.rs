@@ -140,6 +140,11 @@ impl Lodestone {
 }
 
 async fn run_server(software: &str, version: &str, nether_folder: &str) {
+    run_server_with(software, version, nether_folder, None).await;
+}
+
+/// `plugin`: a Modrinth project slug to install first, and the name it logs.
+async fn run_server_with(software: &str, version: &str, nether_folder: &str, plugin: Option<(&str, &str)>) {
     let dir = data_dir(software);
     let app = Lodestone::boot(dir.clone()).await;
     assert_eq!(app.get("/system").await["runtime"]["available"], true, "Docker must be running");
@@ -147,8 +152,30 @@ async fn run_server(software: &str, version: &str, nether_folder: &str) {
     let instance = app.create(software, version).await;
     let id = instance["id"].as_str().unwrap().to_owned();
     let world_id = instance["worldId"].as_str().unwrap().to_owned();
+    let profile_id = instance["profileId"].as_str().unwrap().to_owned();
+    if let Some((slug, _)) = plugin {
+        // A real install plan and download from Modrinth.
+        let plan = app
+            .post(&format!("/profiles/{profile_id}/content/plan"), json!({ "items": [{ "provider": "modrinth", "projectId": slug }] }))
+            .await;
+        let items: Vec<Value> = plan["install"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| json!({ "provider": i["provider"], "projectId": i["projectId"], "versionId": i["versionId"] }))
+            .collect();
+        assert!(!items.is_empty(), "{plan}");
+        app.post(&format!("/profiles/{profile_id}/content"), json!({ "items": items })).await;
+    }
     app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
     app.wait_state(&id, "running").await;
+    if let Some((_, logs_as)) = plugin {
+        let console = app.get(&format!("/instances/{id}/console?tail=2000")).await;
+        let enabled = console.as_array().unwrap().iter().any(|line| {
+            line["message"].as_str().is_some_and(|m| m.contains(&format!("Enabling {logs_as}")))
+        });
+        assert!(enabled, "{logs_as} didn't load");
+    }
 
     // RCON works end to end.
     let lines = app.post(&format!("/instances/{id}/console"), json!({ "command": "list" })).await;
@@ -181,6 +208,8 @@ async fn run_server(software: &str, version: &str, nether_folder: &str) {
     let folder = app.get(&format!("/worlds/{world_id}")).await["folder"].as_str().unwrap().to_owned();
     assert!(universe.join(&folder).join("level.dat").is_file(), "level.dat missing in {universe:?}");
     assert!(universe.join(nether_folder.replace("{folder}", &folder)).is_dir(), "nether folder missing");
+    // Lodestone read which version saved it.
+    assert_eq!(app.get(&format!("/worlds/{world_id}")).await["savedWith"], version);
 
     // Deleting the instance keeps the world.
     app.call(Method::DELETE, &format!("/instances/{id}"), None).await;
@@ -194,7 +223,12 @@ async fn vanilla_server_runs_in_docker() {
 
 #[tokio::test]
 async fn paper_server_runs_in_docker() {
-    run_server("paper", "1.21.4", "{folder}_nether").await;
+    run_server_with("paper", "1.21.4", "{folder}_nether", Some(("chunky", "Chunky"))).await;
+}
+
+#[tokio::test]
+async fn neoforge_server_runs_in_docker() {
+    run_server("neoforge", "1.21.1", "{folder}/DIM-1").await;
 }
 
 #[tokio::test]

@@ -339,7 +339,10 @@ async fn prepare(
 ) -> AppResult<LaunchSpec> {
     let p = &profile.profile;
     job.progress(None, format!("Resolving {} {}", p.software, p.version)).await;
-    let Launch::Jar { artifact, java_major } = app.software.resolve(p.software_id, &p.version).await?;
+    let launch = app.software.resolve(p.software_id, &p.version).await?;
+    let java_major = match &launch {
+        Launch::Jar { java_major, .. } | Launch::Installer { java_major, .. } => *java_major,
+    };
     let java = match java_major {
         Some(java) => java,
         None => software::java_major(&app.software.catalog().await?, p.software_id, &p.version)?,
@@ -354,11 +357,27 @@ async fn prepare(
             app.events.changed(ResourceKind::Profiles, Some(p.id.clone()));
         }
     }
-    job.progress(Some(0.0), format!("Downloading {}", artifact.filename)).await;
-    let jar = app.cache.fetch(&artifact, Some(job)).await?;
-
     job.progress(None, format!("Getting Java {java} ({image})")).await;
     app.runtime.ensure_image(&image, job).await?;
+
+    // What the container runs: a server jar, or a loader's installed libraries.
+    let (server_mount, launch_args) = match &launch {
+        Launch::Jar { artifact, .. } => {
+            job.progress(Some(0.0), format!("Downloading {}", artifact.filename)).await;
+            let jar = app.cache.fetch(artifact, Some(job)).await?;
+            (
+                Mount { host: jar, container: "/server/server.jar".into(), read_only: true },
+                vec!["-jar".to_owned(), "server.jar".to_owned()],
+            )
+        }
+        Launch::Installer { installer, key, .. } => {
+            let (dir, args_file) = install_loader(app, job, installer, key, &image, &p.software).await?;
+            (
+                Mount { host: dir.join("libraries"), container: "/server/libraries".into(), read_only: true },
+                vec![format!("@{args_file}")],
+            )
+        }
+    };
 
     job.progress(None, "Writing server files").await;
     let run_dir = app.paths.instance(&record.id);
@@ -371,7 +390,7 @@ async fn prepare(
 
     let mut mounts = vec![
         Mount { host: run_dir.clone(), container: "/server".into(), read_only: false },
-        Mount { host: jar, container: "/server/server.jar".into(), read_only: true },
+        server_mount,
         Mount { host: universe, container: "/server/worlds".into(), read_only: false },
     ];
     // The profile's mods or plugins, from its lockfile.
@@ -407,7 +426,8 @@ async fn prepare(
         format!("-Xmx{}M", p.memory.max_mb),
     ];
     command.extend(p.java_args.split_whitespace().map(str::to_owned));
-    command.extend(["-jar", "server.jar", "--universe", "worlds", "--nogui"].map(str::to_owned));
+    command.extend(launch_args);
+    command.extend(["--universe", "worlds", "--nogui"].map(str::to_owned));
 
     let mut env = record.environment.clone();
     env.insert("LODESTONE_RCON_PASSWORD".into(), record.rcon_password.clone());
@@ -432,6 +452,80 @@ async fn prepare(
         version: p.version.clone(),
         level_folder: world.folder.clone(),
     })
+}
+
+/// Runs a Forge or NeoForge installer once per version into
+/// `cache/installs/<key>`, and returns that folder plus the path (relative
+/// to the server dir) of the `unix_args.txt` it wrote.
+async fn install_loader(
+    app: &AppState,
+    job: &JobHandle,
+    installer: &crate::cache::Artifact,
+    key: &str,
+    image: &str,
+    label: &str,
+) -> AppResult<(std::path::PathBuf, String)> {
+    let dir = app.paths.installs().join(key);
+    let marker = dir.join(".lodestone-installed");
+    // One install at a time: two servers on the same loader share it.
+    let _guard = app.install_lock.lock().await;
+    if !marker.is_file() {
+        job.progress(Some(0.0), format!("Downloading {}", installer.filename)).await;
+        let jar = app.cache.fetch(installer, Some(job)).await?;
+        let staging = dir.with_extension("partial");
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        tokio::fs::create_dir_all(&staging).await?;
+        job.progress(None, format!("Installing {label} (first start only; it downloads its libraries)")).await;
+        let task = crate::runtime::TaskSpec {
+            name: key.to_owned(),
+            image: image.to_owned(),
+            mounts: vec![
+                Mount { host: jar, container: "/installer.jar".into(), read_only: true },
+                Mount { host: staging.clone(), container: "/install".into(), read_only: false },
+            ],
+            workdir: "/install".into(),
+            command: ["java", "-jar", "/installer.jar", "--installServer", "/install"].map(str::to_owned).to_vec(),
+            memory_limit_mb: 2048,
+        };
+        let output = app.runtime.run_task(&task, job).await?;
+        if output.code != 0 {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "The {label} installer failed (exit {}): {}",
+                output.code,
+                output.tail.last().cloned().unwrap_or_default()
+            )));
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::rename(&staging, &dir).await?;
+        tokio::fs::write(&marker, now_iso()).await?;
+    }
+    let root = dir.clone();
+    let args = tokio::task::spawn_blocking(move || find_args_file(&root.join("libraries")))
+        .await
+        .map_err(anyhow::Error::from)?
+        .ok_or_else(|| {
+            AppError::Internal(anyhow::anyhow!(
+                "The {label} install has no unix_args.txt; delete {} and start again.",
+                dir.display()
+            ))
+        })?;
+    let relative = args.strip_prefix(&dir).map_err(anyhow::Error::from)?.to_string_lossy().replace('\\', "/");
+    Ok((dir, relative))
+}
+
+fn find_args_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_args_file(&path) {
+                return Some(found);
+            }
+        } else if entry.file_name() == "unix_args.txt" {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Run-dir paths a profile folder may not shadow.

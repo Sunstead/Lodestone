@@ -20,7 +20,7 @@ use bollard::Docker;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use super::{LaunchSpec, Process, ProcessEvent, ProcessStats, Runtime};
+use super::{LaunchSpec, Process, ProcessEvent, ProcessStats, Runtime, TaskOutput, TaskSpec};
 use crate::error::{AppError, AppResult};
 use crate::jobs::JobHandle;
 use crate::model::RuntimeInfo;
@@ -283,6 +283,76 @@ impl Runtime for DockerRuntime {
             events,
             rcon_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, spec.ports.rcon)),
         })
+    }
+
+    async fn run_task(&self, task: &TaskSpec, job: &JobHandle) -> AppResult<TaskOutput> {
+        let docker = self.docker()?.clone();
+        let name = format!("lodestone-task-{}-{}", task.name, crate::util::secret(6).to_lowercase());
+        let binds = task
+            .mounts
+            .iter()
+            .map(|mount| {
+                format!(
+                    "{}:{}{}",
+                    self.host_path(&mount.host),
+                    mount.container,
+                    if mount.read_only { ":ro" } else { "" }
+                )
+            })
+            .collect();
+        let config = Config {
+            image: Some(task.image.clone()),
+            cmd: Some(task.command.clone()),
+            working_dir: Some(task.workdir.clone()),
+            env: Some(vec![format!("HOME={}", task.workdir)]),
+            user: self.user.clone(),
+            tty: Some(false),
+            host_config: Some(HostConfig {
+                binds: Some(binds),
+                memory: Some(task.memory_limit_mb as i64 * 1024 * 1024),
+                init: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let created = docker
+            .create_container(Some(CreateContainerOptions { name: name.clone(), platform: None }), config)
+            .await
+            .map_err(|err| docker_err("creating the task container", err))?;
+        let result = async {
+            docker
+                .start_container(&created.id, None::<StartContainerOptions<String>>)
+                .await
+                .map_err(|err| docker_err("starting the task container", err))?;
+            let mut events = self.follow(docker.clone(), created.id.clone(), "all");
+            let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+            let mut code = -1;
+            while let Some(event) = events.recv().await {
+                match event {
+                    ProcessEvent::Output(line) => {
+                        let line = line.trim().to_owned();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        job.progress(None, line.chars().take(120).collect::<String>()).await;
+                        if tail.len() == 20 {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
+                    ProcessEvent::Exited { code: exit } => {
+                        code = exit;
+                        break;
+                    }
+                }
+            }
+            Ok(TaskOutput { code, tail: tail.into_iter().collect() })
+        }
+        .await;
+        let _ = docker
+            .remove_container(&created.id, Some(RemoveContainerOptions { force: true, ..Default::default() }))
+            .await;
+        result
     }
 
     async fn adopt(&self, instance_id: &str) -> AppResult<Option<Process>> {

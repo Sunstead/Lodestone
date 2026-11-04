@@ -824,3 +824,21 @@ async fn worlds_import_and_download_as_zips() {
     let (status, err) = upload(&app, "/worlds/import", "junk.zip", zip(&[("readme.txt", b"hi")])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
 }
+
+#[tokio::test]
+async fn neoforge_runs_its_installer_once() {
+    let app = TestApp::new().await;
+    let instance =
+        app.create_instance(json!({ "newProfile": profile_spec("neoforge", "1.21.1"), "start": true })).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    app.wait_state(&id, "running").await;
+    let install = app.state.paths.installs().join("neoforge-1.21.1-fake");
+    assert!(install.join(".lodestone-installed").is_file());
+    assert!(install.join("libraries/net/lodestone/fake-loader/1.0/unix_args.txt").is_file());
+
+    // NeoForge configurations take mods.
+    let profile = instance["profileId"].as_str().unwrap();
+    let index = app.get(&format!("/profiles/{profile}/content")).await;
+    assert_eq!(index["kind"], "mods");
+    assert_eq!(index["loaders"], json!(["neoforge"]));
+}

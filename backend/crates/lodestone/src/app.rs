@@ -35,6 +35,8 @@ pub struct Services {
     pub content: Providers,
     /// Serialises changes to profiles' lockfiles.
     pub content_lock: tokio::sync::Mutex<()>,
+    /// Serialises Forge/NeoForge installs.
+    pub install_lock: tokio::sync::Mutex<()>,
     pub paths: Paths,
     pub store: Store,
     pub events: EventBus,
@@ -98,6 +100,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         auth,
         content: Providers::new(content),
         content_lock: tokio::sync::Mutex::new(()),
+        install_lock: tokio::sync::Mutex::new(()),
         jobs: Jobs::new(store.clone(), events.clone()),
         cache: BlobCache::new(paths.blobs(), http),
         host: HostSampler::start(config.data_dir.clone()),

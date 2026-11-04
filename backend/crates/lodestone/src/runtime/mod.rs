@@ -50,6 +50,25 @@ impl LaunchSpec {
     }
 }
 
+/// A one-off command run to completion, e.g. a mod loader's installer.
+#[derive(Debug, Clone)]
+pub struct TaskSpec {
+    /// Container name prefix, for `docker ps` readers.
+    pub name: String,
+    pub image: String,
+    pub mounts: Vec<Mount>,
+    pub workdir: String,
+    pub command: Vec<String>,
+    pub memory_limit_mb: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskOutput {
+    pub code: i64,
+    /// The last lines it printed, for error messages.
+    pub tail: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum ProcessEvent {
     /// One line of stdout/stderr.
@@ -98,4 +117,7 @@ pub trait Runtime: Send + Sync {
     async fn remove(&self, container_id: &str) -> AppResult<()>;
 
     async fn stats(&self, container_id: &str) -> AppResult<Option<ProcessStats>>;
+
+    /// Runs `task` to completion, reporting its output on `job`.
+    async fn run_task(&self, task: &TaskSpec, job: &JobHandle) -> AppResult<TaskOutput>;
 }

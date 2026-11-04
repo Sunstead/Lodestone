@@ -1,7 +1,8 @@
 # Lodestone architecture
 
-Lodestone runs Minecraft servers on one host for one admin. It keeps three
-things apart:
+Lodestone runs Minecraft servers on one Docker host. People sign in through
+Authentik (OIDC) and each owns their own worlds, configurations and servers;
+admins come from Authentik groups. It keeps three things apart:
 
 | Asset | What it is | Lifetime |
 |---|---|---|
@@ -19,10 +20,11 @@ Lodestone ships no Minecraft code, mods or Java runtimes:
   - Mojang's piston-meta for vanilla
   - PaperMC's Fill API for Paper
   - Fabric meta for Fabric
-  - Forge and NeoForge from their Mavens
+  - Forge and NeoForge installers from their Mavens. Each installer runs once per version in a throwaway JRE container into `cache/installs/<key>`, and servers launch with the `@libraries/.../unix_args.txt` it writes.
+- Mods and plugins come from Modrinth, pinned by sha512 in each profile's lockfile, or from an upload.
 - Every download is checked against its published hash and stored content-addressed in `cache/blobs/<algo>/<hash>`.
 - Servers run in stock `eclipse-temurin:<java>-jre` images. The Java major version comes from Mojang's version metadata.
-- `eula.txt` is written only after the admin accepts the Minecraft EULA in Settings.
+- `eula.txt` is written only after the server's owner accepts the Minecraft EULA in Settings.
 
 ## Repository
 
@@ -44,11 +46,14 @@ scripts/    dev.mjs, with-backend.mjs
 | Module | Responsibility |
 |---|---|
 | `model` | Every wire type. `cargo test` exports them to `frontend/src/api/generated/`. |
-| `api/` | Axum routes under `/api/v1`. Thin: validation and DTO assembly. |
-| `store` + `migrations/` | SQLite. Assets are JSON documents. Relational rules live in the schema (`UNIQUE(world_id)`, `ON DELETE RESTRICT`). |
+| `api/` | Axum routes under `/api/v1`. Thin: validation, ownership checks, DTO assembly. |
+| `auth/` | OIDC (Authentik), ported from Solstice: offline JWKS verification, the server-side PKCE code flow (`/auth/login`, `/auth/callback`, `/auth/logout`), session cookies, the CSRF guard, `CurrentUser` and ownership checks. `--dev-user` for development. |
+| `content/` | Mods and plugins. `ContentProvider` (Modrinth, plus an offline fake that shares `shared/fake-content.json` with the demo), install plans, the per-profile lockfile, jar uploads, `.mrpack` import, and linking jars into `plugins/` or `mods/` on start. |
+| `level`, `worldfiles` | `level.dat` (version that last saved a world, seed, day), world zip import and export. |
+| `store` + `migrations/` | SQLite. Assets are JSON documents with an `owner_id`. Relational rules live in the schema (`UNIQUE(world_id)`, `ON DELETE RESTRICT`). Users, sessions (hashed tokens) and sign-in flows. |
 | `supervisor` | Per-instance state machine, console ring buffer, RCON, player tracking, crash policy, metrics sampling, boot-time reconcile. |
 | `runtime/` | `Runtime` trait. `fake` simulates a server in-process and serves real RCON. `docker` runs containers through bollard. |
-| `software/` | `SoftwareProvider` trait: catalog, Java version, artifact to run. `real` talks to Mojang/PaperMC/Fabric; `fake` is offline. |
+| `software/` | `SoftwareProvider` trait: catalog, Java version, what to run (a jar, or a loader installer). `real` talks to Mojang, PaperMC, Fabric, Forge and NeoForge; `fake` is offline. |
 | `cache` | Hash-verified, content-addressed downloads. |
 | `properties` | Shared schema, ownership validation, `server.properties` rendering and parsing. |
 | `backups` | `tar.zst` archives with `save-off`/`save-all flush` around them, atomic restore, scheduler. |
@@ -65,17 +70,18 @@ start ─▶ preparing ─▶ starting ─"Done ("─▶ running ─stop─▶ s
 
 1. **Prepare** (a `prepare` job with progress):
    - Resolve software and version to an artifact.
-   - Fetch the artifact into the cache.
    - Make sure the JRE image exists.
+   - Fetch the jar into the cache, or for Forge/NeoForge, run the installer once.
    - Write the run dir: `server.properties` merged from world + profile + managed keys, `eula.txt`, and ops/whitelist/ban JSON.
+   - Link the profile's enabled mods or plugins from the cache into its `plugins/` or `mods/` folder and remove any other top-level jar there. Config folders beside them are left alone.
 2. **Run.** The container bind-mounts:
 
    | Host | Container | Access |
    |---|---|---|
    | `instances/<id>` | `/server` | read-write |
-   | the cached jar | `/server/server.jar` | read-only |
+   | the cached jar (or the loader install's `libraries/`) | `/server/server.jar` (`/server/libraries`) | read-only |
    | `worlds/<worldId>` | `/server/worlds` | read-write |
-   | the profile's `plugins/` or `mods/`+`config/` | `/server/plugins`, `/server/mods`, `/server/config` | read-write |
+   | the profile's `plugins/` or `mods/`+`config/`, and any other folder a modpack brought | `/server/<name>` | read-write |
 
    The command is `java -Xms -Xmx … -jar server.jar --universe worlds --nogui`. Vanilla, Paper, Fabric and Forge all honour `--universe`, so one mount works for both world layouts. The game port is published on every interface. RCON is published on `127.0.0.1` only, with a per-instance random password.
 3. **Supervise:**
@@ -89,7 +95,21 @@ start ─▶ preparing ─▶ starting ─"Done ("─▶ running ─stop─▶ s
 - A world attaches to one instance (enforced by the database).
 - Generation fields lock once the world has generated.
 - A Paper-layout world refuses non-Paper profiles (`layout_mismatch`).
-- DataVersion downgrade guards come in M4.
+- After each run Lodestone reads `level.dat`. A world refuses a Minecraft version older than the one that last saved it (`world_newer`).
+
+## Accounts and ownership
+
+- **Sign-in:** OIDC through Authentik, as a public client with PKCE. The backend runs the code flow and gives the browser an HttpOnly session cookie; no provider token reaches the browser. Scripts may send an Authentik access token as a bearer token instead.
+- **Ownership:** every world, profile and instance has an `owner_id`.
+  - Lists return the caller's own.
+  - Anything else answers 404, so ids can't be probed.
+  - A server is made of its owner's own world and profile.
+  - Ports are host-wide, so they're checked across everyone.
+- **Admins** are members of `LODESTONE_OIDC_ADMIN_GROUPS`. They change app settings, see the People list, and can open anyone's assets.
+- **The EULA** is accepted per user, for their own servers.
+- **Events and jobs** over SSE are filtered to what the caller can see.
+- **Cookie-authenticated changes** need `X-Lodestone-Request: 1` and a same-origin `Origin`.
+- `docs/deploy.md` covers the Authentik setup and the compose file.
 
 ## Frontend modes
 
@@ -111,9 +131,10 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 | API integration: real router, SQLite, fake runtime with real RCON | `backend/crates/lodestone/tests/api.rs` | `cargo test` |
 | Frontend unit tests | `frontend/src/**/*.test.ts` | `npm test` |
 | **Contract parity**: the same scenarios against demo and a live backend | `frontend/src/api/contract.test.ts` | `just test-contract` |
-| Browser E2E (demo, full stack on the fake runtime) | `e2e/` | `just e2e` |
-| Real containers: Vanilla, Paper, Fabric, reattach | `backend/crates/lodestone/tests/docker.rs` | `just test-docker` |
-| Live publisher APIs | `#[ignore]` tests in `software/real.rs` | `just test-live` |
+| Browser E2E: demo, full stack on the fake runtime, and sign-in through a stand-in OIDC provider (`e2e/mock-oidc.mjs`) | `e2e/` | `just e2e` |
+| Auth: tokens, sessions, CSRF, ownership, groups (mock OIDC provider) | `backend/crates/lodestone/src/auth/tests.rs` | `cargo test` |
+| Real containers: Vanilla, Paper with a real Modrinth plugin, Fabric, NeoForge (installer), reattach | `backend/crates/lodestone/tests/docker.rs` | `just test-docker` |
+| Live publisher APIs (Mojang, PaperMC, Fabric, Forge, NeoForge, Modrinth) | `#[ignore]` tests in `software/real.rs`, `content/modrinth.rs` | `just test-live` |
 | A joinable server, end to end | `scripts/smoke.mjs` | `just smoke` (`--keep` to play) |
 
 ## Roadmap
@@ -121,9 +142,10 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 - [x] **M0** Monorepo, tooling, shared property schema, CI.
 - [x] **M1** Backend on the fake runtime, end to end: CRUD with one-request (atomic) create, lifecycle, console (SSE), RCON, players, backups, jobs, events, settings/system. Generated contract, contract parity, E2E.
 - [x] **M2** Real software providers: Mojang (sha1), Paper Fill v3 (sha256), Fabric (launcher pinned on first download). Exact Java from publisher metadata (e.g. 26.x → Java 25). SQLite-cached catalogs with stale fallback when offline.
-- [ ] **M2b** Forge/NeoForge: run the installer once per version in a throwaway container into `cache/installs/`, launch with `@unix_args.txt`.
-- [x] **M3** Docker runtime: bollard, image pulls with progress, `127.0.0.1`-only RCON, runs as the data dir's owner, adopt-on-boot, container stats. `just test-docker` runs Vanilla/Paper/Fabric and a reattach test; `just smoke` brings up a joinable server.
-- [ ] **M4** Worlds: level.dat (DataVersion guard, offline day/time), import/download, layout conversion.
-- [ ] **M5** Modrinth: search, install plan with dependencies, update check, upload, `.mrpack` import. Mods panel rewrite.
-- [ ] **M6** Auth (single admin), onboarding wizard, frontend embedded in the binary, Docker image and compose file.
-- [ ] **M7** CurseForge (API key, manual download for restricted files) and Hangar.
+- [x] **M2b** Forge (1.17+) and NeoForge: the installer runs once per version in a throwaway container into `cache/installs/`; servers launch with `@unix_args.txt`.
+- [x] **M3** Docker runtime: bollard, image pulls with progress, `127.0.0.1`-only RCON, runs as the data dir's owner, adopt-on-boot, container stats. `just test-docker` runs Vanilla/Paper/Fabric/NeoForge and a reattach test; `just smoke` brings up a joinable server.
+- [x] **M4** Worlds: level.dat (version guard, seed, offline day/time), zip import and download. *Not done:* converting a Paper-layout world back to vanilla.
+- [x] **M5** Modrinth: search, install plans with dependencies, update checks, uploads, `.mrpack` import. Mods panel rewrite.
+- [x] **M6** Accounts through Authentik (OIDC) with per-user ownership, a Docker image and compose file (`docs/deploy.md`). *Not done:* a first-run onboarding wizard (Settings covers the EULA and public address).
+- [ ] **M7** More content sources: Hangar (Paper plugins), and CurseForge (needs an API key; restricted files go through a manual download, as in Prism). Both slot in as `ContentProvider`s.
+- [ ] Later: layout conversion, per-user quotas (servers, memory), and the CurseForge modpack format.

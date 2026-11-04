@@ -52,6 +52,18 @@ impl SoftwareProvider for FakeSoftware {
 
     async fn resolve(&self, software: ServerSoftwareId, version: &str) -> AppResult<Launch> {
         super::java_major(&catalog(), software, version)?;
+        if matches!(software, ServerSoftwareId::Forge | ServerSoftwareId::Neoforge) {
+            let name = software.label().to_lowercase();
+            let bytes = format!("lodestone fake installer: {name} {version}\n").into_bytes();
+            let installer = Artifact {
+                filename: format!("{name}-{version}-installer.jar"),
+                source: Source::Inline(bytes),
+                hash: None,
+                size: None,
+                pin: None,
+            };
+            return Ok(Launch::Installer { installer, java_major: None, key: format!("{name}-{version}-fake") });
+        }
         let filename = format!("{}-{version}.jar", software.label().to_lowercase());
         let bytes = format!("lodestone fake server: {} {version}\n", software.label()).into_bytes();
         let artifact = Artifact { filename, source: Source::Inline(bytes), hash: None, size: None, pin: None };

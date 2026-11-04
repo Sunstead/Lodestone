@@ -66,3 +66,7 @@ smoke:
 
 # Everything CI runs.
 ci: test test-contract check-types e2e
+
+# Build the production image (backend + built UI). See docs/deploy.md.
+image:
+    docker build -t lodestone .

@@ -20,6 +20,21 @@ pub enum Launch {
         /// The exact Java the publisher asks for, when it says.
         java_major: Option<u32>,
     },
+    /// Forge and NeoForge: run the installer once (`--installServer`) into
+    /// `cache/installs/<key>`, then launch with the `@.../unix_args.txt`
+    /// file it writes under `libraries/`.
+    Installer {
+        installer: Artifact,
+        java_major: Option<u32>,
+        /// Names the install, e.g. `neoforge-21.1.77`.
+        key: String,
+    },
+}
+
+/// Orders dotted versions numerically, newest first (`1.21.10` > `1.21.9`).
+pub fn newest_first(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |v: &str| -> Vec<u64> { v.split(['.', '-']).map(|p| p.parse().unwrap_or(0)).collect() };
+    parse(b).cmp(&parse(a))
 }
 
 #[async_trait]

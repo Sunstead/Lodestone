@@ -6,8 +6,11 @@
 //! | Paper | PaperMC Fill v3 | latest STABLE build's `server:default` | sha256 |
 //! | Fabric | Fabric meta (stable game versions) | the generated server launcher | pinned on first download |
 //!
-//! Forge and NeoForge need their installer run once per version; they are
-//! added with the installer job.
+//! | Forge (1.17+) | `promotions_slim.json` (recommended, else latest) | the installer from Forge's Maven | its `.sha1` |
+//! | NeoForge | NeoForged Maven metadata (newest stable per Minecraft version) | the installer | its `.sha1` |
+//!
+//! Forge and NeoForge installers run once per version (see
+//! `supervisor::install_loader`); servers launch from what they write.
 
 use std::time::Duration;
 
@@ -15,7 +18,7 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use super::{java_for_minecraft, Launch, SoftwareProvider};
+use super::{java_for_minecraft, newest_first, Launch, SoftwareProvider};
 use crate::cache::{Artifact, Hash, HashAlgo, Source};
 use crate::error::{AppError, AppResult};
 use crate::model::{ServerSoftwareId, SoftwareCatalog, SoftwareOption, SoftwareVersion};
@@ -31,6 +34,10 @@ pub struct Endpoints {
     pub mojang_manifest: String,
     pub paper: String,
     pub fabric: String,
+    /// `promotions_slim.json`.
+    pub forge_promotions: String,
+    pub forge_maven: String,
+    pub neoforge_maven: String,
 }
 
 impl Default for Endpoints {
@@ -39,8 +46,50 @@ impl Default for Endpoints {
             mojang_manifest: "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json".into(),
             paper: "https://fill.papermc.io/v3".into(),
             fabric: "https://meta.fabricmc.net/v2".into(),
+            forge_promotions: "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json".into(),
+            forge_maven: "https://maven.minecraftforge.net/net/minecraftforge/forge".into(),
+            neoforge_maven: "https://maven.neoforged.net/releases/net/neoforged/neoforge".into(),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ForgePromotions {
+    promos: std::collections::BTreeMap<String, String>,
+}
+
+/// The Minecraft version a NeoForge version is for: `21.1.77` is for
+/// 1.21.1, `21.0.x` for 1.21, `26.1.2.123` for 26.1.2, `26.3.0.99` for 26.3.
+pub fn neoforge_minecraft(version: &str) -> Option<String> {
+    let parts: Vec<&str> = version.split('-').next()?.split('.').collect();
+    let major: u32 = parts.first()?.parse().ok()?;
+    if major >= 26 {
+        let (minor, patch) = (parts.get(1)?, parts.get(2)?);
+        Some(if *patch == "0" { format!("{major}.{minor}") } else { format!("{major}.{minor}.{patch}") })
+    } else {
+        let minor = parts.get(1)?;
+        Some(if *minor == "0" { format!("1.{major}") } else { format!("1.{major}.{minor}") })
+    }
+}
+
+/// Newest stable NeoForge per Minecraft version (a beta only where nothing
+/// stable exists yet), newest Minecraft first.
+pub fn neoforge_latest(metadata: &str) -> Vec<(String, String, bool)> {
+    let mut versions: Vec<&str> =
+        metadata.split("<version>").skip(1).filter_map(|chunk| chunk.split("</version>").next()).collect();
+    versions.sort_by(|a, b| newest_first(a, b));
+    let mut out: Vec<(String, String, bool)> = vec![];
+    for version in versions {
+        let Some(minecraft) = neoforge_minecraft(version) else { continue };
+        let stable = !version.contains('-');
+        match out.iter_mut().find(|(mc, _, _)| *mc == minecraft) {
+            Some(existing) if !existing.2 && stable => *existing = (minecraft, version.to_owned(), true),
+            Some(_) => {}
+            None => out.push((minecraft, version.to_owned(), stable)),
+        }
+    }
+    out.sort_by(|a, b| newest_first(&a.0, &b.0));
+    out
 }
 
 pub struct RealSoftware {
@@ -177,6 +226,90 @@ impl RealSoftware {
                 None => Err(AppError::Internal(anyhow::anyhow!("could not reach {url}: {err}"))),
             },
         }
+    }
+
+    /// GET text with the same cache (Maven metadata, `.sha1` files).
+    async fn get_text(&self, url: &str, ttl_secs: i64) -> AppResult<String> {
+        let key = format!("GET {url}");
+        if let Some(body) = self.store.cache_get(&key, ttl_secs).await? {
+            return Ok(body);
+        }
+        let fetched = async {
+            let response = self.http.get(url).timeout(Duration::from_secs(20)).send().await?.error_for_status()?;
+            response.text().await
+        }
+        .await;
+        match fetched {
+            Ok(body) => {
+                self.store.cache_put(&key, &body).await?;
+                Ok(body)
+            }
+            Err(err) => match self.store.cache_get(&key, i64::MAX / 2).await? {
+                Some(stale) => Ok(stale),
+                None => Err(AppError::Internal(anyhow::anyhow!("could not reach {url}: {err}"))),
+            },
+        }
+    }
+
+    /// Forge's promoted build per Minecraft version (recommended, else latest), 1.17 and up.
+    async fn forge_builds(&self) -> AppResult<Vec<(String, String, bool)>> {
+        let promotions: ForgePromotions = self.get_json(&self.endpoints.forge_promotions, CATALOG_TTL_SECS).await?;
+        let mut out: Vec<(String, String, bool)> = vec![];
+        for (key, build) in &promotions.promos {
+            let Some((minecraft, kind)) = key.rsplit_once('-') else { continue };
+            if crate::logparse::version_at_least(minecraft, "1.17") != Some(true) {
+                continue;
+            }
+            let recommended = kind == "recommended";
+            match out.iter_mut().find(|(mc, _, _)| mc == minecraft) {
+                Some(existing) if recommended => *existing = (minecraft.to_owned(), build.clone(), true),
+                Some(_) => {}
+                None => out.push((minecraft.to_owned(), build.clone(), recommended)),
+            }
+        }
+        out.sort_by(|a, b| newest_first(&a.0, &b.0));
+        Ok(out)
+    }
+
+    async fn neoforge_builds(&self) -> AppResult<Vec<(String, String, bool)>> {
+        let metadata =
+            self.get_text(&format!("{}/maven-metadata.xml", self.endpoints.neoforge_maven), CATALOG_TTL_SECS).await?;
+        Ok(neoforge_latest(&metadata))
+    }
+
+    async fn installer(&self, software: ServerSoftwareId, version: &str) -> AppResult<Launch> {
+        let (builds, label) = match software {
+            ServerSoftwareId::Forge => (self.forge_builds().await?, "Forge"),
+            _ => (self.neoforge_builds().await?, "NeoForge"),
+        };
+        let (_, build, _) = builds
+            .into_iter()
+            .find(|(minecraft, _, _)| minecraft == version)
+            .ok_or_else(|| AppError::bad_request(format!("{label} has no build for Minecraft {version}.")))?;
+        let (artifact_version, url) = match software {
+            ServerSoftwareId::Forge => {
+                let full = format!("{version}-{build}");
+                (full.clone(), format!("{}/{full}/forge-{full}-installer.jar", self.endpoints.forge_maven))
+            }
+            _ => (build.clone(), format!("{}/{build}/neoforge-{build}-installer.jar", self.endpoints.neoforge_maven)),
+        };
+        let sha1 = self.get_text(&format!("{url}.sha1"), IMMUTABLE_TTL_SECS).await?;
+        let sha1 = sha1.split_whitespace().next().unwrap_or_default().to_owned();
+        if sha1.len() != 40 {
+            return Err(AppError::Internal(anyhow::anyhow!("{label} published no usable sha1 for {artifact_version}")));
+        }
+        let java = self.mojang_java(version).await.unwrap_or_else(|_| java_for_minecraft(version));
+        let prefix = label.to_lowercase();
+        Ok(Launch::Installer {
+            installer: Artifact::url(
+                format!("{prefix}-{artifact_version}-installer.jar"),
+                url,
+                Hash { algo: HashAlgo::Sha1, hex: sha1 },
+                None,
+            ),
+            java_major: Some(java),
+            key: format!("{prefix}-{artifact_version}"),
+        })
     }
 
     async fn mojang_manifest(&self) -> AppResult<MojangManifest> {
@@ -332,8 +465,25 @@ impl SoftwareProvider for RealSoftware {
 
     async fn catalog(&self) -> AppResult<SoftwareCatalog> {
         use ServerSoftwareId::*;
-        let (vanilla, paper, fabric) =
-            tokio::join!(self.vanilla_versions(), self.paper_versions(), self.fabric_versions());
+        let (vanilla, paper, fabric, forge, neoforge) = tokio::join!(
+            self.vanilla_versions(),
+            self.paper_versions(),
+            self.fabric_versions(),
+            self.forge_builds(),
+            self.neoforge_builds()
+        );
+        let loader_versions = |builds: AppResult<Vec<(String, String, bool)>>| {
+            builds.map(|builds| {
+                builds
+                    .into_iter()
+                    .map(|(version, _, stable)| SoftwareVersion {
+                        java_major: java_for_minecraft(&version),
+                        version,
+                        stable,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
         let option = |id: ServerSoftwareId, blurb: &str, versions: AppResult<Vec<SoftwareVersion>>| {
             versions.map(|versions| SoftwareOption {
                 id,
@@ -349,6 +499,8 @@ impl SoftwareProvider for RealSoftware {
             option(Vanilla, "The official server from Mojang. No mods or plugins.", vanilla),
             option(Paper, "High-performance fork with Bukkit/Spigot plugin support.", paper),
             option(Fabric, "Lightweight mod loader that tracks new releases quickly.", fabric),
+            option(Forge, "The classic mod loader with the largest back catalogue.", loader_versions(forge)),
+            option(Neoforge, "Community fork of Forge for modern modpacks.", loader_versions(neoforge)),
         ] {
             match result {
                 Ok(option) => software.push(option),
@@ -368,10 +520,7 @@ impl SoftwareProvider for RealSoftware {
             ServerSoftwareId::Vanilla => self.resolve_vanilla(version).await,
             ServerSoftwareId::Paper => self.resolve_paper(version).await,
             ServerSoftwareId::Fabric => self.resolve_fabric(version).await,
-            ServerSoftwareId::Forge | ServerSoftwareId::Neoforge => Err(AppError::NotImplemented(format!(
-                "{} servers need their installer, which Lodestone does not run yet.",
-                software.label()
-            ))),
+            ServerSoftwareId::Forge | ServerSoftwareId::Neoforge => self.installer(software, version).await,
         }
     }
 }
@@ -390,6 +539,9 @@ mod tests {
             mojang_manifest: format!("{}/mojang/manifest.json", server.uri()),
             paper: format!("{}/paper/v3", server.uri()),
             fabric: format!("{}/fabric/v2", server.uri()),
+            forge_promotions: format!("{}/forge/promotions_slim.json", server.uri()),
+            forge_maven: format!("{}/forge/maven", server.uri()),
+            neoforge_maven: format!("{}/neoforge/maven", server.uri()),
         };
         (RealSoftware::new(reqwest::Client::new(), store, endpoints), dir)
     }
@@ -501,7 +653,10 @@ mod tests {
         let server = MockServer::start().await;
         mount_fixtures(&server).await;
         let (provider, _dir) = provider(&server).await;
-        let Launch::Jar { artifact, java_major } = provider.resolve(ServerSoftwareId::Vanilla, "26.3").await.unwrap();
+        let Launch::Jar { artifact, java_major } = provider.resolve(ServerSoftwareId::Vanilla, "26.3").await.unwrap()
+        else {
+            panic!("a plain jar")
+        };
         assert_eq!(java_major, Some(25));
         assert_eq!(artifact.hash.unwrap().hex, "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c");
         assert_eq!(artifact.size, Some(62294556));
@@ -513,7 +668,10 @@ mod tests {
         let server = MockServer::start().await;
         mount_fixtures(&server).await;
         let (provider, _dir) = provider(&server).await;
-        let Launch::Jar { artifact, java_major } = provider.resolve(ServerSoftwareId::Paper, "1.21.4").await.unwrap();
+        let Launch::Jar { artifact, java_major } = provider.resolve(ServerSoftwareId::Paper, "1.21.4").await.unwrap()
+        else {
+            panic!("a plain jar")
+        };
         assert_eq!(artifact.filename, "paper-1.21.4-232.jar");
         assert_eq!(artifact.hash.unwrap().algo, HashAlgo::Sha256);
         assert_eq!(java_major, Some(21));
@@ -524,7 +682,10 @@ mod tests {
         let server = MockServer::start().await;
         mount_fixtures(&server).await;
         let (provider, _dir) = provider(&server).await;
-        let Launch::Jar { artifact, java_major } = provider.resolve(ServerSoftwareId::Fabric, "1.21.4").await.unwrap();
+        let Launch::Jar { artifact, java_major } = provider.resolve(ServerSoftwareId::Fabric, "1.21.4").await.unwrap()
+        else {
+            panic!("a plain jar")
+        };
         assert_eq!(java_major, Some(21));
         assert!(artifact.hash.is_none());
         assert_eq!(artifact.pin.as_deref(), Some("fabric-server-mc.1.21.4-loader.0.20.1-launcher.1.1.2.jar"));
@@ -546,12 +707,69 @@ mod tests {
         assert_eq!(manifest.versions.len(), 3);
     }
 
+    #[test]
+    fn neoforge_versions_name_their_minecraft() {
+        assert_eq!(neoforge_minecraft("21.1.77").as_deref(), Some("1.21.1"));
+        assert_eq!(neoforge_minecraft("21.0.167").as_deref(), Some("1.21"));
+        assert_eq!(neoforge_minecraft("20.4.237").as_deref(), Some("1.20.4"));
+        assert_eq!(neoforge_minecraft("26.1.2.123").as_deref(), Some("26.1.2"));
+        assert_eq!(neoforge_minecraft("26.3.0.99").as_deref(), Some("26.3"));
+        let latest = neoforge_latest(
+            "<versions><version>21.1.76</version><version>21.4.1-beta</version><version>21.1.77</version>\
+             <version>26.3.0.99</version><version>26.3.0.100</version></versions>",
+        );
+        assert_eq!(
+            latest,
+            [
+                ("26.3".to_owned(), "26.3.0.100".to_owned(), true),
+                ("1.21.4".to_owned(), "21.4.1-beta".to_owned(), false),
+                ("1.21.1".to_owned(), "21.1.77".to_owned(), true),
+            ]
+        );
+    }
+
     #[tokio::test]
-    async fn forge_is_explicitly_not_yet_supported() {
+    async fn resolves_forge_and_neoforge_installers() {
         let server = MockServer::start().await;
+        mount_fixtures(&server).await;
+        let mount = |route: String, body: &str| {
+            Mock::given(method("GET")).and(path(route)).respond_with(ResponseTemplate::new(200).set_body_string(body))
+        };
+        mount(
+            "/forge/promotions_slim.json".into(),
+            r#"{"promos":{"1.16.5-recommended":"36.2.34","1.21.1-latest":"52.1.1","1.21.1-recommended":"52.1.0"}}"#,
+        )
+        .mount(&server)
+        .await;
+        mount("/forge/maven/1.21.1-52.1.0/forge-1.21.1-52.1.0-installer.jar.sha1".into(), &"a".repeat(40))
+            .mount(&server)
+            .await;
+        mount("/neoforge/maven/maven-metadata.xml".into(), "<version>21.1.76</version><version>21.1.77</version>")
+            .mount(&server)
+            .await;
+        mount("/neoforge/maven/21.1.77/neoforge-21.1.77-installer.jar.sha1".into(), &"b".repeat(40))
+            .mount(&server)
+            .await;
         let (provider, _dir) = provider(&server).await;
-        let err = provider.resolve(ServerSoftwareId::Forge, "1.21.1").await.unwrap_err();
-        assert!(matches!(err, AppError::NotImplemented(_)));
+
+        let catalog = provider.catalog().await.unwrap();
+        let forge = catalog.software.iter().find(|s| s.id == ServerSoftwareId::Forge).unwrap();
+        assert_eq!(forge.versions.iter().map(|v| v.version.as_str()).collect::<Vec<_>>(), ["1.21.1"], "1.17+ only");
+
+        let Launch::Installer { installer, key, .. } =
+            provider.resolve(ServerSoftwareId::Forge, "1.21.1").await.unwrap()
+        else {
+            panic!("Forge runs an installer")
+        };
+        assert_eq!(key, "forge-1.21.1-52.1.0", "the recommended build");
+        assert_eq!(installer.hash.unwrap().hex, "a".repeat(40));
+
+        let Launch::Installer { key, .. } = provider.resolve(ServerSoftwareId::Neoforge, "1.21.1").await.unwrap()
+        else {
+            panic!("NeoForge runs an installer")
+        };
+        assert_eq!(key, "neoforge-21.1.77");
+        assert!(provider.resolve(ServerSoftwareId::Neoforge, "1.20.1").await.is_err());
     }
 
     /// Hits the real publishers. `just test-live`.
@@ -563,13 +781,21 @@ mod tests {
         let http = reqwest::Client::builder().user_agent("lodestone-tests/0.1").build().unwrap();
         let provider = RealSoftware::new(http, store, Endpoints::default());
         let catalog = provider.catalog().await.unwrap();
-        assert_eq!(catalog.software.len(), 3, "every publisher answered");
+        assert_eq!(catalog.software.len(), 5, "every publisher answered");
         for (software, version) in [
             (ServerSoftwareId::Vanilla, "1.21.4"),
             (ServerSoftwareId::Paper, "1.21.4"),
             (ServerSoftwareId::Fabric, "1.21.4"),
         ] {
-            let Launch::Jar { java_major, .. } = provider.resolve(software, version).await.unwrap();
+            let Launch::Jar { java_major, .. } = provider.resolve(software, version).await.unwrap() else {
+                panic!("{software:?} is a plain jar")
+            };
+            assert_eq!(java_major, Some(21), "{software:?}");
+        }
+        for software in [ServerSoftwareId::Forge, ServerSoftwareId::Neoforge] {
+            let Launch::Installer { java_major, .. } = provider.resolve(software, "1.21.1").await.unwrap() else {
+                panic!("{software:?} runs an installer")
+            };
             assert_eq!(java_major, Some(21), "{software:?}");
         }
     }

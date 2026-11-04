@@ -77,12 +77,14 @@ export function AppSettingsPage() {
             <UserRound className='size-4' /> Account
           </CardTitle>
           <CardDescription>
-            {me.data?.auth.mode === 'dev'
+            {mode === 'demo'
+              ? 'Demo data: there is no sign-in.'
+              : me.data?.auth.mode === 'dev'
               ? 'Development mode: there is no sign-in, and everyone is this admin.'
               : 'Signed in through your identity provider. Your worlds, configurations and servers are yours alone.'}
           </CardDescription>
         </CardHeader>
-        <CardContent className='flex flex-wrap items-center justify-between gap-3'>
+        <CardContent className='flex flex-row flex-wrap items-center justify-between gap-3'>
           <div className='min-w-0'>
             <p className='flex items-center gap-2 font-medium'>
               {me.data?.user.displayName ?? '—'}

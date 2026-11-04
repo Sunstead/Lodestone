@@ -1,0 +1,39 @@
+# Lodestone behind your reverse proxy, signing in through Authentik.
+#
+#   cp compose.example.yaml compose.yaml   # then edit the domains
+#   docker compose up -d
+#
+# Servers run as sibling containers on this Docker host, so Lodestone needs:
+#   - the Docker socket;
+#   - host networking: it talks to each server's RCON on 127.0.0.1, and
+#     checks which game ports are free on the host;
+#   - its data dir mounted at the SAME path inside and outside, because it
+#     hands those paths to Docker for the servers' bind mounts. (If they
+#     must differ, set LODESTONE_HOST_DATA_DIR to the host path.)
+# Create the data dir first, owned by the user that should own server files:
+#   sudo mkdir -p /srv/lodestone && sudo chown "$USER": /srv/lodestone
+
+services:
+  lodestone:
+    build: .
+    image: lodestone:latest
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Only your reverse proxy should reach this. 0.0.0.0 if it's elsewhere.
+      LODESTONE_BIND: 127.0.0.1:7878
+      LODESTONE_DATA: /srv/lodestone
+      # Where browsers reach Lodestone; the sign-in callback is <this>/auth/callback.
+      LODESTONE_PUBLIC_URL: https://lodestone.example.com
+      # Authentik: Applications → Providers → OAuth2/OpenID (public client).
+      LODESTONE_OIDC_ISSUER: https://auth.example.com/application/o/lodestone/
+      LODESTONE_OIDC_CLIENT_ID: lodestone
+      # Members of these groups manage Lodestone; everyone else who can sign
+      # in gets their own servers, worlds and configurations.
+      LODESTONE_OIDC_ADMIN_GROUPS: homelab-admins
+      # Optional: only these groups may sign in at all.
+      # LODESTONE_OIDC_ALLOWED_GROUPS: minecraft
+      RUST_LOG: lodestone=info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/lodestone:/srv/lodestone

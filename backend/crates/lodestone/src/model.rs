@@ -934,7 +934,7 @@ pub struct BackupIndex {
 }
 
 /* ------------------------------------------------------------------------ */
-/* Mods & plugins (owned by a profile)                                      */
+/* Content: mods & plugins (owned by a profile)                             */
 /* ------------------------------------------------------------------------ */
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -945,68 +945,288 @@ pub enum ModKind {
     Mod,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Where a mod or plugin came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
-pub enum ModSource {
+pub enum ContentSource {
     Modrinth,
-    Spigotmc,
-    Curseforge,
     Hangar,
-    #[serde(rename = "built-in")]
-    BuiltIn,
+    Curseforge,
+    /// A jar the user uploaded.
     Upload,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct ModEntry {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub latest_version: Option<String>,
-    pub kind: ModKind,
-    pub source: ModSource,
-    pub author: String,
-    pub description: String,
-    #[ts(type = "number")]
-    pub size_bytes: u64,
-    #[ts(type = "number")]
-    pub downloads: u64,
-    pub enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub update_available: Option<bool>,
+impl ContentSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Modrinth => "Modrinth",
+            Self::Hangar => "Hangar",
+            Self::Curseforge => "CurseForge",
+            Self::Upload => "Upload",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Modrinth => "modrinth",
+            Self::Hangar => "hangar",
+            Self::Curseforge => "curseforge",
+            Self::Upload => "upload",
+        }
+    }
 }
 
+/// A searchable source of mods and plugins, with what it can offer the
+/// profile being browsed.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct CatalogEntry {
+pub struct ContentProviderInfo {
+    pub id: ContentSource,
+    pub label: String,
+    /// False when it can't serve this profile (e.g. Hangar has no mods) or
+    /// needs setup (CurseForge without an API key); `reason` says why.
+    pub available: bool,
+    pub reason: Option<String>,
+}
+
+/// A project (mod or plugin) in search results.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentProject {
+    pub provider: ContentSource,
     pub id: String,
+    pub slug: String,
     pub name: String,
     pub author: String,
     pub description: String,
-    pub kind: ModKind,
-    pub source: ModSource,
-    pub latest_version: String,
-    #[ts(type = "number")]
-    pub size_bytes: u64,
+    pub icon_url: Option<String>,
+    pub page_url: String,
     #[ts(type = "number")]
     pub downloads: u64,
     pub categories: Vec<String>,
+    pub kind: ModKind,
+    /// Already in the profile being browsed.
+    pub installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct ModIndex {
-    pub installed: Vec<ModEntry>,
-    /// Replaced by remote search when content providers land (M5).
-    pub catalog: Vec<CatalogEntry>,
-    pub loader: String,
+pub struct ContentSearchResult {
+    pub hits: Vec<ContentProject>,
+    #[ts(type = "number")]
+    pub total: u64,
+    #[ts(type = "number")]
+    pub offset: u64,
+    #[ts(type = "number")]
+    pub limit: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum DependencyKind {
+    Required,
+    Optional,
+    Incompatible,
+    Embedded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentDependency {
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub kind: DependencyKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum VersionChannel {
+    Release,
+    Beta,
+    Alpha,
+}
+
+/// One published version of a project, with its primary file.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentVersion {
+    pub provider: ContentSource,
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub version_number: String,
+    pub channel: VersionChannel,
+    pub published_at: String,
+    #[ts(type = "number")]
+    pub downloads: u64,
+    pub game_versions: Vec<String>,
+    pub loaders: Vec<String>,
+    pub filename: String,
+    #[ts(type = "number")]
+    pub size_bytes: u64,
+    pub dependencies: Vec<ContentDependency>,
+    /// Runs on the profile's loader and Minecraft version.
+    pub compatible: bool,
+}
+
+/// Something to install: a project, optionally pinned to a version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentRef {
+    pub provider: ContentSource,
+    pub project_id: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub version_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentPlanRequest {
+    pub items: Vec<ContentRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InstalledVersion {
+    pub entry_id: String,
+    pub version_name: String,
+}
+
+/// One file the plan will install.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PlanItem {
+    pub provider: ContentSource,
+    pub project_id: String,
+    pub version_id: String,
+    pub name: String,
+    pub version_number: String,
+    pub filename: String,
+    #[ts(type = "number")]
+    pub size_bytes: u64,
+    pub icon_url: Option<String>,
+    /// `None` when asked for; the project that needs it otherwise.
+    pub required_by: Option<String>,
+    /// The installed version this replaces.
+    pub replaces: Option<InstalledVersion>,
+}
+
+/// An optional dependency the user may add.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PlanSuggestion {
+    pub provider: ContentSource,
+    pub project_id: String,
+    pub name: String,
+    pub suggested_by: String,
+}
+
+/// Something that stops the plan from being installed as is.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PlanConflict {
+    pub name: String,
+    pub message: String,
+}
+
+/// What installing the requested projects takes: the files (requested
+/// plus required dependencies), optional extras, and blocking conflicts.
+/// Nothing is installed until the plan's items are applied.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InstallPlan {
+    pub install: Vec<PlanItem>,
+    pub optional: Vec<PlanSuggestion>,
+    pub conflicts: Vec<PlanConflict>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ApplyContentRequest {
+    /// Exact versions, normally a plan's `install` list.
+    pub items: Vec<ContentRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AvailableUpdate {
+    pub version_id: String,
+    pub version_name: String,
+}
+
+/// An installed mod or plugin: one line of the profile's lockfile.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentEntry {
+    pub id: String,
+    pub provider: ContentSource,
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub name: String,
+    pub version_name: String,
+    pub filename: String,
+    #[ts(type = "number")]
+    pub size_bytes: u64,
+    pub kind: ModKind,
+    pub author: String,
+    pub description: String,
+    pub icon_url: Option<String>,
+    pub page_url: Option<String>,
+    pub enabled: bool,
+    /// Installed because another entry needs it.
+    pub dependency: bool,
+    /// Names of installed entries that need this one.
+    pub required_by: Vec<String>,
+    /// Built for the profile's loader and Minecraft version. Uploads are
+    /// assumed to be.
+    pub compatible: bool,
+    pub update: Option<AvailableUpdate>,
+    pub installed_at: String,
+}
+
+/// A profile's mods or plugins.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ContentIndex {
+    /// `vanilla` means the software can't load mods or plugins.
+    pub kind: ContentKind,
+    /// Loader names the providers know (`paper`, `fabric`, ...).
+    pub loaders: Vec<String>,
+    pub game_version: String,
+    pub entries: Vec<ContentEntry>,
+    /// When updates were last checked.
+    pub checked_at: Option<String>,
+    /// Where mods or plugins for this profile can be found.
+    pub providers: Vec<ContentProviderInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateContentRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub enabled: Option<bool>,
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1031,6 +1251,10 @@ pub enum JobKind {
     Backup,
     Restore,
     SwitchWorld,
+    /// Downloading mods or plugins into a profile.
+    Install,
+    /// Importing a modpack (`.mrpack`) as a new profile.
+    Import,
 }
 
 /// Long-running work, e.g. downloading a server jar before first start.
@@ -1086,8 +1310,6 @@ pub enum LodestoneEvent {
 pub struct AppSettings {
     /// Host players type to connect, e.g. `play.example.com`. Blank = `localhost`.
     pub public_address: String,
-    /// The admin has accepted the Minecraft EULA (https://aka.ms/MinecraftEULA).
-    pub eula_accepted: bool,
     pub default_java_args: String,
 }
 
@@ -1098,9 +1320,75 @@ pub struct UpdateSettingsRequest {
     #[ts(optional)]
     pub public_address: Option<String>,
     #[ts(optional)]
-    pub eula_accepted: Option<bool>,
-    #[ts(optional)]
     pub default_java_args: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum AuthMode {
+    /// Sign-in through the identity provider (Authentik).
+    Oidc,
+    /// `--dev-user`: everyone is one admin. Development only.
+    Dev,
+}
+
+/// How to sign in. Public: nothing here is secret.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AuthInfo {
+    pub mode: AuthMode,
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UserInfo {
+    pub id: String,
+    /// The provider's username.
+    pub username: String,
+    pub display_name: String,
+    /// Manages Lodestone's settings and can open anyone's assets.
+    pub admin: bool,
+}
+
+/// The signed-in user.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Me {
+    pub user: UserInfo,
+    /// This user has accepted the Minecraft EULA (https://aka.ms/MinecraftEULA),
+    /// which their servers need to start.
+    pub eula_accepted: bool,
+    pub auth: AuthInfo,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UpdateMeRequest {
+    #[ts(optional)]
+    pub eula_accepted: Option<bool>,
+}
+
+/// A user, for admins.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UserSummary {
+    pub user: UserInfo,
+    pub eula_accepted: bool,
+    #[ts(type = "number")]
+    pub worlds: u64,
+    #[ts(type = "number")]
+    pub profiles: u64,
+    #[ts(type = "number")]
+    pub instances: u64,
+    pub last_seen_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1134,6 +1422,7 @@ pub struct SystemInfo {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub auth: AuthInfo,
 }
 
 /// Every error response: `{ "error": { "code", "message" } }`.

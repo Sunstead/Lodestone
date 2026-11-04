@@ -48,6 +48,10 @@ pub struct JobHandle {
 }
 
 impl JobHandle {
+    pub async fn snapshot(&self) -> Job {
+        self.inner.lock().await.clone()
+    }
+
     pub async fn id(&self) -> String {
         self.inner.lock().await.id.clone()
     }

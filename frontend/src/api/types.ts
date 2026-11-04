@@ -16,7 +16,13 @@
  *
  * Endpoint map (all under `/api/v1`, errors are `ApiErrorBody`):
  *
- *   GET    /health                                 -> HealthResponse
+ * Everything but `/health` needs a signed-in user (session cookie from
+ * `/auth/login`, or a bearer token). Cookie requests that change things
+ * send `X-Lodestone-Request: 1`. Lists show the caller's own assets.
+ *
+ *   GET    /health                                 -> HealthResponse (how to sign in)
+ *   GET    /me  PATCH /me                          -> Me ({ eulaAccepted })
+ *   GET    /users                                  -> UserSummary[] (admins)
  *   GET    /events                                 -> SSE `lodestone`: LodestoneEvent
  *   GET    /jobs                                   -> Job[]
  *   GET    /jobs/:id                               -> Job
@@ -46,7 +52,17 @@
  *   POST   /profiles/:id/duplicate                 -> Profile
  *   GET    /profiles/:id/properties                -> PropertyFile
  *   PUT    /profiles/:id/properties                -> { changes } -> PropertyFile
- *   GET    /profiles/:id/mods                      -> ModIndex
+ *   POST   /profiles/import                        -> multipart .mrpack -> Job (targetId = new profile)
+ *   GET    /profiles/:id/content                   -> ContentIndex
+ *   GET    /profiles/:id/content/search?q&provider&sort&offset -> ContentSearchResult
+ *   GET    /profiles/:id/content/projects/:provider/:project/versions -> ContentVersion[]
+ *   POST   /profiles/:id/content/plan              -> ContentPlanRequest -> InstallPlan
+ *   POST   /profiles/:id/content                   -> ApplyContentRequest -> ContentIndex
+ *   PATCH  /profiles/:id/content/:entry            -> { enabled } -> ContentIndex
+ *   DELETE /profiles/:id/content/:entry            -> ContentIndex
+ *   POST   /profiles/:id/content/:entry/update     -> ContentIndex
+ *   POST   /profiles/:id/content/check-updates     -> ContentIndex
+ *   POST   /profiles/:id/content/upload            -> multipart .jar -> ContentIndex
  *
  *   GET    /instances                              -> Instance[]
  *   POST   /instances                              -> CreateInstanceRequest -> Instance
@@ -67,6 +83,10 @@ export type { ActionRequest } from './generated/ActionRequest';
 export type { ApiErrorBody } from './generated/ApiErrorBody';
 export type { ApiErrorDetail } from './generated/ApiErrorDetail';
 export type { AppSettings } from './generated/AppSettings';
+export type { ApplyContentRequest } from './generated/ApplyContentRequest';
+export type { AuthInfo } from './generated/AuthInfo';
+export type { AuthMode } from './generated/AuthMode';
+export type { AvailableUpdate } from './generated/AvailableUpdate';
 export type { Backup } from './generated/Backup';
 export type { BackupIndex } from './generated/BackupIndex';
 export type { BackupKind } from './generated/BackupKind';
@@ -74,16 +94,26 @@ export type { BackupSchedule } from './generated/BackupSchedule';
 export type { BackupStatus } from './generated/BackupStatus';
 export type { BackupStorage } from './generated/BackupStorage';
 export type { BanEntry } from './generated/BanEntry';
-export type { CatalogEntry } from './generated/CatalogEntry';
 export type { CommandRequest } from './generated/CommandRequest';
 export type { ConsoleLine } from './generated/ConsoleLine';
 export type { ConsoleSource } from './generated/ConsoleSource';
 export type { ContainerInfo } from './generated/ContainerInfo';
+export type { ContentDependency } from './generated/ContentDependency';
+export type { ContentEntry } from './generated/ContentEntry';
+export type { ContentIndex } from './generated/ContentIndex';
 export type { ContentKind } from './generated/ContentKind';
+export type { ContentPlanRequest } from './generated/ContentPlanRequest';
+export type { ContentProject } from './generated/ContentProject';
+export type { ContentProviderInfo } from './generated/ContentProviderInfo';
+export type { ContentRef } from './generated/ContentRef';
+export type { ContentSearchResult } from './generated/ContentSearchResult';
+export type { ContentSource } from './generated/ContentSource';
+export type { ContentVersion } from './generated/ContentVersion';
 export type { CreateInstanceRequest } from './generated/CreateInstanceRequest';
 export type { CreateProfileRequest } from './generated/CreateProfileRequest';
 export type { CreateWorldRequest } from './generated/CreateWorldRequest';
 export type { DataPacks } from './generated/DataPacks';
+export type { DependencyKind } from './generated/DependencyKind';
 export type { Difficulty } from './generated/Difficulty';
 export type { Dimension } from './generated/Dimension';
 export type { Dimensions } from './generated/Dimensions';
@@ -91,6 +121,8 @@ export type { DiskUsage } from './generated/DiskUsage';
 export type { GameMode } from './generated/GameMode';
 export type { HealthResponse } from './generated/HealthResponse';
 export type { HostUsage } from './generated/HostUsage';
+export type { InstallPlan } from './generated/InstallPlan';
+export type { InstalledVersion } from './generated/InstalledVersion';
 export type { Instance } from './generated/Instance';
 export type { InstancePorts } from './generated/InstancePorts';
 export type { InstanceProfileRef } from './generated/InstanceProfileRef';
@@ -102,12 +134,13 @@ export type { JobState } from './generated/JobState';
 export type { LevelType } from './generated/LevelType';
 export type { LodestoneEvent } from './generated/LodestoneEvent';
 export type { LogLevel } from './generated/LogLevel';
+export type { Me } from './generated/Me';
 export type { MemoryUsage } from './generated/MemoryUsage';
-export type { ModEntry } from './generated/ModEntry';
-export type { ModIndex } from './generated/ModIndex';
 export type { ModKind } from './generated/ModKind';
-export type { ModSource } from './generated/ModSource';
 export type { NetworkUsage } from './generated/NetworkUsage';
+export type { PlanConflict } from './generated/PlanConflict';
+export type { PlanItem } from './generated/PlanItem';
+export type { PlanSuggestion } from './generated/PlanSuggestion';
 export type { Player } from './generated/Player';
 export type { PlayerActionKind } from './generated/PlayerActionKind';
 export type { PlayerActionRequest } from './generated/PlayerActionRequest';
@@ -132,11 +165,16 @@ export type { SoftwareOption } from './generated/SoftwareOption';
 export type { SoftwareVersion } from './generated/SoftwareVersion';
 export type { SwitchWorldRequest } from './generated/SwitchWorldRequest';
 export type { SystemInfo } from './generated/SystemInfo';
+export type { UpdateContentRequest } from './generated/UpdateContentRequest';
 export type { UpdateInstanceRequest } from './generated/UpdateInstanceRequest';
+export type { UpdateMeRequest } from './generated/UpdateMeRequest';
 export type { UpdateProfileRequest } from './generated/UpdateProfileRequest';
 export type { UpdateScheduleRequest } from './generated/UpdateScheduleRequest';
 export type { UpdateSettingsRequest } from './generated/UpdateSettingsRequest';
 export type { UpdateWorldRequest } from './generated/UpdateWorldRequest';
+export type { UserInfo } from './generated/UserInfo';
+export type { UserSummary } from './generated/UserSummary';
+export type { VersionChannel } from './generated/VersionChannel';
 export type { World } from './generated/World';
 export type { WorldLayout } from './generated/WorldLayout';
 export type { WorldStatus } from './generated/WorldStatus';

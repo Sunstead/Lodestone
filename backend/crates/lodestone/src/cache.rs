@@ -98,6 +98,11 @@ impl BlobCache {
         Some(Hash { algo: HashAlgo::Sha256, hex: hex.trim().to_owned() })
     }
 
+    /// The cached file for `hash`, if it's there.
+    pub fn cached(&self, hash: &Hash) -> Option<PathBuf> {
+        Some(self.path_for(hash)).filter(|path| path.is_file())
+    }
+
     /// Returns the cached path, downloading and verifying when missing.
     pub async fn fetch(&self, artifact: &Artifact, job: Option<&JobHandle>) -> AppResult<PathBuf> {
         let pinned = self.pinned(artifact);

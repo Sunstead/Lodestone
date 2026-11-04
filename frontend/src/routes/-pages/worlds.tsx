@@ -174,7 +174,7 @@ export function WorldDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className='max-h-[60vh] space-y-4 overflow-y-auto pr-1'>
+        <div className='-mx-1 max-h-[60vh] min-w-0 space-y-4 overflow-x-hidden overflow-y-auto px-1 pb-1'>
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor='world-name'>Name</FieldLabel>

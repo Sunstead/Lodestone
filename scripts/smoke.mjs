@@ -56,7 +56,7 @@ if (build.status !== 0) process.exit(build.status ?? 1);
 step('Starting Lodestone (Docker runtime, real downloads)');
 const backend = spawn(
   join(root, 'backend', 'target', 'debug', 'lodestone'),
-  ['--data-dir', dataDir, '--bind', `127.0.0.1:${port}`, '--runtime', 'docker', '--providers', 'real', '--accept-eula'],
+  ['--data-dir', dataDir, '--bind', `127.0.0.1:${port}`, '--runtime', 'docker', '--providers', 'real', '--accept-eula', '--dev-user', 'smoke'],
   { stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? 'lodestone=warn' } },
 );
 

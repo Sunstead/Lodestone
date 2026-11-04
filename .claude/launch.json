@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "demo",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--port", "3100"],
+      "env": { "VITE_LODESTONE_MODE": "demo" },
+      "port": 3100
+    }
+  ]
+}

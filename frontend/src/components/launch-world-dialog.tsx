@@ -222,7 +222,7 @@ export function LaunchWorldDialog({
         </DialogHeader>
 
         {phase === 'configure' ? (
-          <div className='max-h-[64vh] space-y-5 overflow-y-auto pr-1'>
+          <div className='-mx-1 max-h-[64vh] min-w-0 space-y-5 overflow-x-hidden overflow-y-auto px-1 pb-1'>
             <FieldGroup>
               <Field>
                 <FieldLabel>World</FieldLabel>

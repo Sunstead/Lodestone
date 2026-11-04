@@ -249,8 +249,12 @@ async fn starting_requires_the_eula() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(err["error"]["code"], "eula_required");
 
-    let (status, _) = app.call(Method::PATCH, "/settings", Some(json!({ "eulaAccepted": true }))).await;
+    // Acceptance is per user: their own servers may start.
+    let me = app.get("/me").await;
+    assert_eq!(me["eulaAccepted"], false);
+    let (status, me) = app.call(Method::PATCH, "/me", Some(json!({ "eulaAccepted": true }))).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["eulaAccepted"], true);
     let (status, _) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
     assert_eq!(status, StatusCode::OK);
     app.wait_state(id, "running").await;
@@ -526,4 +530,231 @@ async fn events_announce_changes() {
     let event = serde_json::to_value(event).unwrap();
     assert_eq!(event["type"], "changed");
     assert_eq!(event["resource"], "worlds");
+}
+
+/* ------------------------------ content ------------------------------ */
+
+async fn paper_profile(app: &TestApp) -> String {
+    let (status, profile) = app.post("/profiles", profile_spec("paper", "1.21.4")).await;
+    assert_eq!(status, StatusCode::CREATED, "{profile}");
+    profile["id"].as_str().unwrap().to_owned()
+}
+
+fn names(index: &Value) -> Vec<String> {
+    let mut names: Vec<String> =
+        index["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_owned()).collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn content_search_plan_and_install() {
+    let app = TestApp::new().await;
+    let id = paper_profile(&app).await;
+
+    let index = app.get(&format!("/profiles/{id}/content")).await;
+    assert_eq!(index["kind"], "plugins");
+    assert_eq!(index["providers"][0]["id"], "modrinth");
+
+    let results = app.get(&format!("/profiles/{id}/content/search?q=guard")).await;
+    assert_eq!(results["hits"][0]["name"], "WorldGuard");
+    assert_eq!(results["hits"][0]["kind"], "plugin");
+    // Fabric-only mods never show up for Paper.
+    let results = app.get(&format!("/profiles/{id}/content/search?q=lithium")).await;
+    assert_eq!(results["total"], 0);
+
+    let (status, plan) = app
+        .post(
+            &format!("/profiles/{id}/content/plan"),
+            json!({ "items": [{ "provider": "modrinth", "projectId": "fk-worldguard" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let install = plan["install"].as_array().unwrap();
+    assert_eq!(install.len(), 2, "WorldGuard plus WorldEdit: {plan}");
+    assert_eq!(install[1]["requiredBy"], "WorldGuard");
+
+    let items: Vec<Value> = install
+        .iter()
+        .map(|item| json!({ "provider": item["provider"], "projectId": item["projectId"], "versionId": item["versionId"] }))
+        .collect();
+    let (status, index) = app.post(&format!("/profiles/{id}/content"), json!({ "items": items })).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(names(&index), ["WorldEdit", "WorldGuard"]);
+    let worldedit = index["entries"].as_array().unwrap().iter().find(|e| e["name"] == "WorldEdit").unwrap().clone();
+    assert_eq!(worldedit["dependency"], true);
+    assert_eq!(worldedit["requiredBy"], json!(["WorldGuard"]));
+    assert_eq!(worldedit["compatible"], true);
+
+    let results = app.get(&format!("/profiles/{id}/content/search?q=world")).await;
+    assert!(results["hits"].as_array().unwrap().iter().all(|hit| hit["installed"] == true));
+
+    // An install job ran.
+    let jobs = app.get("/jobs").await;
+    assert!(jobs.as_array().unwrap().iter().any(|job| job["kind"] == "install" && job["state"] == "succeeded"));
+}
+
+#[tokio::test]
+async fn content_updates_toggles_and_removal() {
+    let app = TestApp::new().await;
+    let id = paper_profile(&app).await;
+    let (status, index) = app
+        .post(
+            &format!("/profiles/{id}/content"),
+            json!({ "items": [{ "provider": "modrinth", "projectId": "fk-worldedit", "versionId": "fk-worldedit-7.3.9" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    let entry = index["entries"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(index["entries"][0]["update"], Value::Null);
+
+    let (_, index) = app.post(&format!("/profiles/{id}/content/check-updates"), json!({})).await;
+    assert_eq!(index["entries"][0]["update"]["versionName"], "7.3.10");
+    assert!(index["checkedAt"].is_string());
+
+    let (status, index) = app.post(&format!("/profiles/{id}/content/{entry}/update"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    assert_eq!(index["entries"][0]["versionName"], "7.3.10");
+    assert_eq!(index["entries"][0]["id"], entry, "updated in place");
+    assert_eq!(index["entries"][0]["update"], Value::Null);
+
+    let (status, index) =
+        app.call(Method::PATCH, &format!("/profiles/{id}/content/{entry}"), Some(json!({ "enabled": false }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(index["entries"][0]["enabled"], false);
+
+    let (status, index) = app.call(Method::DELETE, &format!("/profiles/{id}/content/{entry}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(index["entries"], json!([]));
+
+    // Incompatible versions are refused outright.
+    let (status, err) = app
+        .post(
+            &format!("/profiles/{id}/content"),
+            json!({ "items": [{ "provider": "modrinth", "projectId": "fk-coreprotect", "versionId": "fk-coreprotect-22.4" }] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err["error"]["code"], "incompatible");
+}
+
+#[tokio::test]
+async fn vanilla_profiles_have_no_content() {
+    let app = TestApp::new().await;
+    let (_, profile) = app.post("/profiles", profile_spec("vanilla", "1.21.4")).await;
+    let id = profile["id"].as_str().unwrap();
+    let index = app.get(&format!("/profiles/{id}/content")).await;
+    assert_eq!(index["kind"], "vanilla");
+    let (status, err) = app.call(Method::GET, &format!("/profiles/{id}/content/search?q=x"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err["error"]["code"], "content_unsupported");
+}
+
+async fn upload(app: &TestApp, path: &str, filename: &str, bytes: Vec<u8>) -> (StatusCode, Value) {
+    let boundary = "lodestone-test-boundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/java-archive\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend(bytes);
+    body.extend(format!("\r\n--{boundary}--\r\n").into_bytes());
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1{path}"))
+        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut out);
+        for (name, body) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(body).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    out.into_inner()
+}
+
+#[tokio::test]
+async fn uploads_name_themselves_and_are_placed_on_start() {
+    let app = TestApp::new().await;
+    let instance = app.create_instance(json!({})).await;
+    let (id, profile) = (instance["id"].as_str().unwrap(), instance["profileId"].as_str().unwrap());
+
+    let jar = zip(&[("plugin.yml", b"name: TreeFeller\nversion: 2.1\nauthor: Ana\nmain: a.B\n")]);
+    let (status, index) = upload(&app, &format!("/profiles/{profile}/content/upload"), "TreeFeller.jar", jar).await;
+    assert_eq!(status, StatusCode::OK, "{index}");
+    let entry = &index["entries"][0];
+    assert_eq!((entry["name"].as_str(), entry["provider"].as_str()), (Some("TreeFeller"), Some("upload")));
+    assert_eq!(entry["versionName"], "2.1");
+
+    // A mod in a plugin configuration is refused.
+    let fabric_mod = zip(&[("fabric.mod.json", br#"{"id":"x","name":"X","version":"1"}"#)]);
+    let (status, err) = upload(&app, &format!("/profiles/{profile}/content/upload"), "x.jar", fabric_mod).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+
+    // A stray jar that Lodestone didn't put there is cleared on start.
+    let plugins = app.state.paths.profile(profile).join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::write(plugins.join("stray.jar"), b"x").unwrap();
+    std::fs::create_dir_all(plugins.join("TreeFeller")).unwrap();
+
+    app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    app.wait_state(id, "running").await;
+    assert!(plugins.join("TreeFeller.jar").is_file());
+    assert!(!plugins.join("stray.jar").exists());
+    assert!(plugins.join("TreeFeller").is_dir(), "plugin folders are left alone");
+}
+
+#[tokio::test]
+async fn modpacks_import_as_new_configurations() {
+    let app = TestApp::new().await;
+    // The fake provider recognises its own jars by hash.
+    let lithium = b"lodestone fake content: fk-lithium-0.15.1\n";
+    let sha512 = |bytes: &[u8]| {
+        use sha2::Digest;
+        hex::encode(sha2::Sha512::digest(bytes))
+    };
+    let index = json!({
+        "formatVersion": 1, "game": "minecraft", "versionId": "1.0", "name": "Cozy Pack", "summary": "Small",
+        "dependencies": { "minecraft": "1.21.4", "fabric-loader": "0.16.10" },
+        "files": [
+            { "path": "mods/lithium.jar", "hashes": { "sha512": sha512(lithium) }, "env": { "server": "required" },
+              "downloads": ["https://cdn.modrinth.com/data/x/lithium.jar"], "fileSize": lithium.len() },
+            { "path": "mods/sodium.jar", "hashes": { "sha512": "00" }, "env": { "server": "unsupported" },
+              "downloads": ["https://cdn.modrinth.com/data/y/sodium.jar"], "fileSize": 1 }
+        ]
+    })
+    .to_string();
+    let pack = zip(&[
+        ("modrinth.index.json", index.as_bytes()),
+        ("overrides/config/lithium.properties", b"mixin.ai=false"),
+        ("overrides/mods/bundled.jar", b"jar bytes"),
+    ]);
+    let (status, job) = upload(&app, "/profiles/import", "cozy.mrpack", pack).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{job}");
+    let profile_id = job["targetId"].as_str().unwrap().to_owned();
+    for _ in 0..100 {
+        let job = app.get(&format!("/jobs/{}", job["id"].as_str().unwrap())).await;
+        if job["state"] != "running" {
+            assert_eq!(job["state"], "succeeded", "{job}");
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let profile = app.get(&format!("/profiles/{profile_id}")).await;
+    assert_eq!((profile["name"].as_str(), profile["softwareId"].as_str()), (Some("Cozy Pack 1.0"), Some("fabric")));
+    let content = app.get(&format!("/profiles/{profile_id}/content")).await;
+    assert_eq!(names(&content), ["Lithium", "bundled"]);
+    let config = app.state.paths.profile(&profile_id).join("config/lithium.properties");
+    assert_eq!(std::fs::read_to_string(config).unwrap(), "mixin.ai=false");
 }

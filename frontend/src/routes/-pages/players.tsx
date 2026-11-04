@@ -21,6 +21,7 @@ import {
 import { Input } from '@sunstead/ui/components/input';
 import { ScrollArea } from '@sunstead/ui/components/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@sunstead/ui/components/tabs';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@sunstead/ui/components/tooltip';
 import {
   Table,
   TableBody,
@@ -53,6 +54,45 @@ const DIMENSION_LABEL: Record<NonNullable<Player['dimension']>, string> = {
   end: 'The End',
 };
 
+/**
+ * An icon button in a player row. The tooltip names the action, since the
+ * icons alone are ambiguous. The trigger is a wrapper so a disabled button
+ * (kicking an offline player) still explains itself on hover.
+ */
+function RowAction({
+  label,
+  ariaLabel,
+  disabled,
+  onClick,
+  className,
+  children,
+}: {
+  label: string;
+  ariaLabel: string;
+  disabled?: boolean;
+  onClick: () => void;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className='inline-flex' />}>
+        <Button
+          variant='ghost'
+          size='icon-sm'
+          aria-label={ariaLabel}
+          disabled={disabled}
+          onClick={onClick}
+          className={className}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function PlayerRow({
   player,
   onAction,
@@ -73,12 +113,14 @@ function PlayerRow({
               {player.name.slice(0, 2).toUpperCase()}
             </AvatarFallback>
           </Avatar>
-          <div className='min-w-0'>
+          <div className='min-w-0 max-w-40'>
             <p className='flex items-center gap-1.5 truncate font-medium'>
               {player.name}
               {player.op ? <Crown aria-label='Operator' className='size-3.5 text-yellow-500' /> : null}
             </p>
-            <p className='truncate font-mono text-[11px] text-muted-foreground'>{player.uuid}</p>
+            <p className='truncate font-mono text-[11px] text-muted-foreground' title={player.uuid}>
+              {player.uuid}
+            </p>
           </div>
         </div>
       </TableCell>
@@ -90,7 +132,7 @@ function PlayerRow({
         </Badge>
       </TableCell>
 
-      <TableCell className='hidden text-muted-foreground md:table-cell'>
+      <TableCell className='hidden text-muted-foreground xl:table-cell'>
         {player.dimension ? DIMENSION_LABEL[player.dimension] : '—'}
       </TableCell>
 
@@ -102,49 +144,45 @@ function PlayerRow({
         {formatPlaytime(player.playtimeSeconds)}
       </TableCell>
 
-      <TableCell className='hidden text-right text-muted-foreground lg:table-cell'>
+      <TableCell className='hidden text-right text-muted-foreground xl:table-cell'>
         {formatRelative(player.lastSeen)}
       </TableCell>
 
       <TableCell>
         <div className='flex items-center justify-end gap-1'>
-          <Button
-            variant='ghost'
-            size='icon-sm'
-            aria-label={player.op ? `Remove operator from ${player.name}` : `Make ${player.name} an operator`}
+          <RowAction
+            label={player.op ? 'Remove operator' : 'Make operator'}
+            ariaLabel={player.op ? `Remove operator from ${player.name}` : `Make ${player.name} an operator`}
             disabled={pending}
             onClick={() => onAction(player.op ? 'deop' : 'op')}
           >
             {player.op ? <ShieldOff /> : <ShieldCheck />}
-          </Button>
-          <Button
-            variant='ghost'
-            size='icon-sm'
-            aria-label={player.whitelisted ? `Remove ${player.name} from the whitelist` : `Add ${player.name} to the whitelist`}
+          </RowAction>
+          <RowAction
+            label={player.whitelisted ? 'Remove from whitelist' : 'Add to whitelist'}
+            ariaLabel={player.whitelisted ? `Remove ${player.name} from the whitelist` : `Add ${player.name} to the whitelist`}
             disabled={pending}
             onClick={() => onAction(player.whitelisted ? 'whitelist-remove' : 'whitelist-add')}
           >
             {player.whitelisted ? <UserX /> : <UserPlus />}
-          </Button>
-          <Button
-            variant='ghost'
-            size='icon-sm'
-            aria-label={`Kick ${player.name}`}
+          </RowAction>
+          <RowAction
+            label={player.online ? 'Kick' : 'Kick (only while online)'}
+            ariaLabel={`Kick ${player.name}`}
             disabled={pending || !player.online}
             onClick={() => setConfirm('kick')}
           >
             <CircleSlash />
-          </Button>
-          <Button
-            variant='ghost'
-            size='icon-sm'
-            aria-label={`Ban ${player.name}`}
+          </RowAction>
+          <RowAction
+            label='Ban'
+            ariaLabel={`Ban ${player.name}`}
             disabled={pending}
             onClick={() => setConfirm('ban')}
             className='text-destructive hover:text-destructive'
           >
             <Ban />
-          </Button>
+          </RowAction>
         </div>
       </TableCell>
 
@@ -322,15 +360,16 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
               </CardContent>
             ) : (
               <ScrollArea className='h-[32rem] [&>[data-slot=scroll-area-viewport]>div]:block!'>
+                <TooltipProvider delay={300}>
                 <Table>
                   <TableHeader className='sticky top-0 z-10 bg-card'>
                     <TableRow>
                       <TableHead>Player</TableHead>
                       <TableHead>Status</TableHead>
-                      <TableHead className='hidden md:table-cell'>Dimension</TableHead>
+                      <TableHead className='hidden xl:table-cell'>Dimension</TableHead>
                       <TableHead className='hidden text-right sm:table-cell'>Ping</TableHead>
                       <TableHead className='text-right'>Session</TableHead>
-                      <TableHead className='hidden text-right lg:table-cell'>Last seen</TableHead>
+                      <TableHead className='hidden text-right xl:table-cell'>Last seen</TableHead>
                       <TableHead className='text-right'>Actions</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -345,6 +384,7 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
                     ))}
                   </TableBody>
                 </Table>
+                </TooltipProvider>
               </ScrollArea>
             )}
           </Card>
@@ -357,7 +397,7 @@ export function PlayersPage({ instanceId }: { instanceId: string }) {
             <Ban className='size-4' /> Bans
           </CardTitle>
           <CardDescription>
-            Mirrors banned-players.json and banned-ips.json for the world this server has mounted.
+            Bans belong to this server's configuration, like the whitelist and operators.
           </CardDescription>
         </CardHeader>
         <CardContent>

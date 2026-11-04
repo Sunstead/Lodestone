@@ -14,6 +14,7 @@ use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use super::profiles::new_profile;
 use super::worlds::new_world;
 use crate::app::AppState;
+use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
 use crate::model::{
     ActionRequest, BanEntry, CommandRequest, ConsoleLine, CreateInstanceRequest, Instance, InstancePorts,
@@ -22,7 +23,7 @@ use crate::model::{
     World,
 };
 use crate::ports;
-use crate::store::{InstanceRecord, PlayerRef, ProfileRecord};
+use crate::store::{Asset, InstanceRecord, PlayerRef, ProfileRecord};
 use crate::supervisor;
 use crate::util::{new_id, now_iso, secret};
 
@@ -71,13 +72,14 @@ async fn load(app: &AppState, id: &str) -> AppResult<Instance> {
     Ok(build(app, &record, &profile, &world, &public_host(app).await?))
 }
 
-pub async fn list(State(app): State<AppState>) -> AppResult<Json<Vec<Instance>>> {
+pub async fn list(State(app): State<AppState>, user: CurrentUser) -> AppResult<Json<Vec<Instance>>> {
+    let mine = Some(user.id.as_str());
     let profiles: HashMap<_, _> =
-        app.store.list_profiles().await?.into_iter().map(|p| (p.profile.id.clone(), p)).collect();
-    let worlds: HashMap<_, _> = app.store.list_worlds().await?.into_iter().map(|w| (w.id.clone(), w)).collect();
+        app.store.list_profiles(mine).await?.into_iter().map(|p| (p.profile.id.clone(), p)).collect();
+    let worlds: HashMap<_, _> = app.store.list_worlds(mine).await?.into_iter().map(|w| (w.id.clone(), w)).collect();
     let host = public_host(&app).await?;
     let mut out = Vec::new();
-    for record in app.store.list_instances().await? {
+    for record in app.store.list_instances(mine).await? {
         if let (Some(profile), Some(world)) = (profiles.get(&record.profile_id), worlds.get(&record.world_id)) {
             out.push(build(&app, &record, profile, world, &host));
         }
@@ -85,7 +87,8 @@ pub async fn list(State(app): State<AppState>) -> AppResult<Json<Vec<Instance>>>
     Ok(Json(out))
 }
 
-pub async fn get(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Instance>> {
+pub async fn get(State(app): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> AppResult<Json<Instance>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     Ok(Json(load(&app, &id).await?))
 }
 
@@ -94,8 +97,9 @@ pub async fn get(State(app): State<AppState>, Path(id): Path<String>) -> AppResu
 /* ------------------------------------------------------------------------ */
 
 async fn used_ports(app: &AppState, except: Option<&str>) -> AppResult<HashSet<u16>> {
+    // Ports belong to the host, so every user's instances count.
     let mut used = HashSet::new();
-    for record in app.store.list_instances().await? {
+    for record in app.store.list_instances(None).await? {
         if Some(record.id.as_str()) == except {
             continue;
         }
@@ -118,17 +122,27 @@ fn claim(port: u16, used: &mut HashSet<u16>, what: &str) -> AppResult<u16> {
     Ok(port)
 }
 
+/// A server is made of its owner's own world and profile, even for admins.
+async fn own(app: &AppState, user: &CurrentUser, asset: Asset, id: &str) -> AppResult<()> {
+    if app.store.owner_of(asset, id).await?.as_deref() != Some(user.id.as_str()) {
+        let what = if asset == Asset::World { "world" } else { "configuration" };
+        return Err(AppError::not_found(what, id));
+    }
+    Ok(())
+}
+
 /// Creates an instance and, in the same transaction, a new world and/or
 /// profile. Optionally starts it.
 pub async fn create(
     State(app): State<AppState>,
+    user: CurrentUser,
     Json(req): Json<CreateInstanceRequest>,
 ) -> AppResult<(StatusCode, Json<Instance>)> {
     let name = req.name.trim().to_owned();
     if name.is_empty() {
         return Err(AppError::bad_request("Give the instance a name."));
     }
-    if req.start == Some(true) && !app.store.settings().await?.eula_accepted {
+    if req.start == Some(true) && !(user.eula_accepted || app.config.accept_eula) {
         return Err(AppError::conflict(
             "eula_required",
             "Accept the Minecraft EULA (https://aka.ms/MinecraftEULA) in Settings before starting a server.",
@@ -137,6 +151,7 @@ pub async fn create(
 
     let (world, new_world_record) = match (req.world_id, req.new_world) {
         (Some(id), None) => {
+            own(&app, &user, Asset::World, &id).await?;
             let world = app.store.get_world(&id).await?;
             if world.attached_instance_id.is_some() {
                 return Err(AppError::conflict(
@@ -150,7 +165,10 @@ pub async fn create(
         _ => return Err(AppError::bad_request("Pick an existing world or describe a new one (not both).")),
     };
     let (profile, new_profile_record) = match (req.profile_id, req.new_profile) {
-        (Some(id), None) => (app.store.get_profile(&id).await?, false),
+        (Some(id), None) => {
+            own(&app, &user, Asset::Profile, &id).await?;
+            (app.store.get_profile(&id).await?, false)
+        }
         (None, Some(spec)) => (new_profile(&app, spec).await?, true),
         _ => return Err(AppError::bad_request("Pick an existing configuration or describe a new one (not both).")),
     };
@@ -192,7 +210,12 @@ pub async fn create(
         last_error: None,
     };
     app.store
-        .create_instance_bundle(new_world_record.then_some(&world), new_profile_record.then_some(&profile), &record)
+        .create_instance_bundle(
+            new_world_record.then_some(&world),
+            new_profile_record.then_some(&profile),
+            &record,
+            &user.id,
+        )
         .await?;
     for dir in [app.paths.world(&world.id), app.paths.profile(&profile.profile.id), app.paths.instance(&record.id)] {
         tokio::fs::create_dir_all(dir).await?;
@@ -209,9 +232,11 @@ pub async fn create(
 
 pub async fn update(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(patch): Json<UpdateInstanceRequest>,
 ) -> AppResult<Json<Instance>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let mut record = app.store.get_instance(&id).await?;
     let ports_change = patch.minecraft_port.is_some() || patch.rcon_port.is_some() || patch.query_port.is_some();
     if ports_change && app.instances.slot(&id).state().is_active() {
@@ -242,7 +267,8 @@ pub async fn update(
 
 /// Deleting an instance removes only its container and run dir. The world
 /// and the profile are kept.
-pub async fn delete(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<StatusCode> {
+pub async fn delete(State(app): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> AppResult<StatusCode> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let record = app.store.get_instance(&id).await?;
     if app.instances.slot(&id).state().is_active() {
         supervisor::stop_and_wait(&app, &id).await?;
@@ -259,12 +285,19 @@ pub async fn delete(State(app): State<AppState>, Path(id): Path<String>) -> AppR
 /// Re-points an instance at another world, restarting it if it was running.
 pub async fn switch_world(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(req): Json<SwitchWorldRequest>,
 ) -> AppResult<Json<Instance>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let mut record = app.store.get_instance(&id).await?;
     if record.world_id == req.world_id {
         return Ok(Json(load(&app, &id).await?));
+    }
+    // The world must belong to whoever owns the server.
+    let owner = app.store.owner_of(Asset::Instance, &id).await?;
+    if app.store.owner_of(Asset::World, &req.world_id).await? != owner {
+        return Err(AppError::not_found("world", &req.world_id));
     }
     let world = app.store.get_world(&req.world_id).await?;
     if world.attached_instance_id.is_some() {
@@ -311,9 +344,11 @@ pub async fn switch_world(
 
 pub async fn action(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(req): Json<ActionRequest>,
 ) -> AppResult<Json<Instance>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     app.store.get_instance(&id).await?;
     match req.action {
         ServerAction::Start => supervisor::start(&app, &id).await?,
@@ -323,7 +358,12 @@ pub async fn action(
     Ok(Json(load(&app, &id).await?))
 }
 
-pub async fn status(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<InstanceStatus>> {
+pub async fn status(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<InstanceStatus>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let record = app.store.get_instance(&id).await?;
     let world = app.store.get_world(&record.world_id).await?;
     Ok(Json(supervisor::status(&app, &id, world.size_bytes)))
@@ -336,18 +376,22 @@ pub struct TailQuery {
 
 pub async fn console(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Query(query): Query<TailQuery>,
 ) -> AppResult<Json<Vec<ConsoleLine>>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     app.store.get_instance(&id).await?;
     Ok(Json(app.instances.slot(&id).console_tail(query.tail.unwrap_or(500).min(2000))))
 }
 
 pub async fn send_command(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(req): Json<CommandRequest>,
 ) -> AppResult<Json<Vec<ConsoleLine>>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     app.store.get_instance(&id).await?;
     Ok(Json(supervisor::command(&app, &id, &req.command).await?))
 }
@@ -355,8 +399,10 @@ pub async fn send_command(
 /// SSE: `console` events for every new line, `status` every 3 seconds.
 pub async fn console_stream(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
 ) -> AppResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let record = app.store.get_instance(&id).await?;
     let slot = app.instances.slot(&id);
     let lines = BroadcastStream::new(slot.subscribe_console())
@@ -378,7 +424,12 @@ pub async fn console_stream(
 /* players                                                                  */
 /* ------------------------------------------------------------------------ */
 
-pub async fn players(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<ServerPlayers>> {
+pub async fn players(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ServerPlayers>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let record = app.store.get_instance(&id).await?;
     Ok(Json(player_view(&app, &record).await?))
 }
@@ -439,9 +490,11 @@ fn valid_name(name: &str) -> bool {
 /// server is running, applies the change live over RCON.
 pub async fn player_action(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(req): Json<PlayerActionRequest>,
 ) -> AppResult<Json<ServerPlayers>> {
+    user.check(&app.store, Asset::Instance, &id).await?;
     let record = app.store.get_instance(&id).await?;
     let name = req.name.trim().to_owned();
     if !valid_name(&name) {

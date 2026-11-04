@@ -23,9 +23,18 @@ import {
   UserGroup,
   type LucideIcon,
 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@sunstead/ui/components/dropdown-menu';
+import { ChevronsUpDown, LogOut } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { SidebarInstanceButton } from './sidebar-server-button';
-import { useInstanceAction } from '#/api/queries';
+import { signOut } from '#/api/client';
+import { useInstanceAction, useMe, useSystem } from '#/api/queries';
 import type { Instance } from '#/api/types';
 
 /**
@@ -142,8 +151,8 @@ export function LodestoneSidebar({
 
   return (
     <Sidebar>
-      <SidebarHeader className='border-b text-xl font-semibold'>
-        <div className='px-2 py-1.5 tracking-wide'>LODESTONE</div>
+      <SidebarHeader className='h-12 shrink-0 justify-center border-b py-0 text-xl font-semibold'>
+        <div className='px-2 tracking-wide'>LODESTONE</div>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
@@ -201,11 +210,66 @@ export function LodestoneSidebar({
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className='border-t p-2 text-xs text-muted-foreground'>
-        <span className='px-2'>Docker Engine · SQLite</span>
+      <SidebarFooter className='border-t p-2'>
+        <AccountMenu onOpenSettings={onOpenSettings} />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>
+  );
+}
+
+/** Who's signed in, with the way out. */
+function AccountMenu({ onOpenSettings }: { onOpenSettings: () => void }) {
+  const me = useMe();
+  const system = useSystem();
+  const user = me.data?.user;
+  const initials = (user?.displayName ?? '?')
+    .split(/\s+/)
+    .map((part) => part[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+  const runtime = system.data
+    ? system.data.runtime.available
+      ? `${system.data.runtime.kind === 'docker' ? 'Docker' : system.data.runtime.kind} ${system.data.runtime.version ?? ''}`.trim()
+      : 'Runtime unavailable'
+    : '';
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type='button'
+            className='flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
+          />
+        }
+      >
+        <span className='flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-semibold'>
+          {initials}
+        </span>
+        <span className='min-w-0 flex-1'>
+          <span className='block truncate text-sm font-medium'>{user?.displayName ?? 'Loading…'}</span>
+          <span className='block truncate text-xs text-muted-foreground'>
+            {user ? `@${user.username}${user.admin ? ' · admin' : ''}` : runtime}
+          </span>
+        </span>
+        <ChevronsUpDown aria-hidden='true' className='size-4 shrink-0 text-muted-foreground' />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side='top' align='start' className='w-56'>
+        {runtime ? <p className='px-2 py-1.5 text-xs text-muted-foreground'>{runtime}</p> : null}
+        <DropdownMenuItem onClick={onOpenSettings}>
+          <Settings /> Settings
+        </DropdownMenuItem>
+        {me.data?.auth.mode === 'oidc' ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => void signOut()}>
+              <LogOut /> Sign out
+            </DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

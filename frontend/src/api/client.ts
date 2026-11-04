@@ -29,7 +29,16 @@ import type {
   InstanceStatus,
   Job,
   LodestoneEvent,
-  ModIndex,
+  ContentIndex,
+  ContentPlanRequest,
+  ContentRef,
+  ContentSearchResult,
+  ContentSource,
+  ContentVersion,
+  InstallPlan,
+  Me,
+  UpdateMeRequest,
+  UserSummary,
   PlayerAction,
   Profile,
   PropertyFile,
@@ -125,11 +134,35 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Sends the browser to sign in, then back here. Only the backend knows the
+ * identity provider, so this is a plain navigation to `/auth/login`.
+ */
+export function signIn(): void {
+  if (typeof window === 'undefined') return;
+  const back = `${window.location.pathname}${window.location.search}`;
+  window.location.assign(`/auth/login?return_to=${encodeURIComponent(back)}`);
+}
+
+/** Ends the session, then follows the provider's sign-out page if it has one. */
+export async function signOut(): Promise<void> {
+  const response = await fetch('/auth/logout', { method: 'POST', headers: { 'x-lodestone-request': '1' } });
+  const body = (await response.json().catch(() => ({}))) as { redirect?: string };
+  if (typeof window !== 'undefined') window.location.assign(body.redirect ?? '/');
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, {
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    ...init,
-  });
+  const headers: Record<string, string> = {
+    accept: 'application/json',
+    // Required on cookie-authenticated changes (cross-site request guard).
+    'x-lodestone-request': '1',
+  };
+  if (!(init?.body instanceof FormData)) headers['content-type'] = 'application/json';
+  const response = await fetch(`${BASE}${path}`, { ...init, headers });
+  if (response.status === 401) {
+    // The session ended: sign in again and come back.
+    signIn();
+  }
   if (!response.ok) {
     const text = await response.text().catch(() => '');
     try {
@@ -194,16 +227,64 @@ export const saveProfileProperties = (id: string, changes: Record<string, string
     ? request(`/profiles/${id}/properties`, { method: 'PUT', body: JSON.stringify({ changes }) })
     : local(() => demo.saveProfileProperties(id, changes));
 
-export const getProfileMods = (id: string): Promise<ModIndex> =>
-  live() ? request(`/profiles/${id}/mods`) : local(() => demo.getProfileMods(id));
-export const installMod = (id: string, modId: string): Promise<ModIndex> =>
-  live() ? request(`/profiles/${id}/mods`, post({ modId })) : local(() => demo.installMod(id, modId));
-export const uninstallMod = (id: string, modId: string): Promise<ModIndex> =>
-  live() ? request(`/profiles/${id}/mods/${modId}`, del) : local(() => demo.uninstallMod(id, modId));
-export const patchMod = (id: string, modId: string, enabled: boolean): Promise<ModIndex> =>
-  live() ? request(`/profiles/${id}/mods/${modId}`, patch({ enabled })) : local(() => demo.patchMod(id, modId, enabled));
-export const updateMod = (id: string, modId: string): Promise<ModIndex> =>
-  live() ? request(`/profiles/${id}/mods/${modId}/update`, post()) : local(() => demo.updateMod(id, modId));
+/* ------------------------- mods and plugins ---------------------------- */
+
+const content = (id: string, rest = ''): string => `/profiles/${id}/content${rest}`;
+
+export const getContent = (id: string): Promise<ContentIndex> =>
+  live() ? request(content(id)) : local(() => demo.getContent(id));
+
+export type ContentSearchParams = {
+  q: string;
+  provider?: ContentSource;
+  sort?: 'relevance' | 'downloads' | 'updated' | 'newest';
+  offset?: number;
+  limit?: number;
+};
+
+export function searchContent(id: string, params: ContentSearchParams): Promise<ContentSearchResult> {
+  if (!live()) return local(() => demo.searchContent(id, params));
+  const query = new URLSearchParams({ q: params.q });
+  if (params.provider) query.set('provider', params.provider);
+  if (params.sort) query.set('sort', params.sort);
+  if (params.offset) query.set('offset', String(params.offset));
+  if (params.limit) query.set('limit', String(params.limit));
+  return request(content(id, `/search?${query}`));
+}
+
+export const getContentVersions = (id: string, provider: ContentSource, project: string): Promise<ContentVersion[]> =>
+  live()
+    ? request(content(id, `/projects/${provider}/${encodeURIComponent(project)}/versions`))
+    : local(() => demo.getContentVersions(id, provider, project));
+export const planContent = (id: string, body: ContentPlanRequest): Promise<InstallPlan> =>
+  live() ? request(content(id, '/plan'), post(body)) : local(() => demo.planContent(id, body));
+export const applyContent = (id: string, items: ContentRef[]): Promise<ContentIndex> =>
+  live() ? request(content(id), post({ items })) : local(() => demo.applyContent(id, items));
+export const setContentEnabled = (id: string, entry: string, enabled: boolean): Promise<ContentIndex> =>
+  live() ? request(content(id, `/${entry}`), patch({ enabled })) : local(() => demo.setContentEnabled(id, entry, enabled));
+export const removeContent = (id: string, entry: string): Promise<ContentIndex> =>
+  live() ? request(content(id, `/${entry}`), del) : local(() => demo.removeContent(id, entry));
+export const updateContent = (id: string, entry: string): Promise<ContentIndex> =>
+  live() ? request(content(id, `/${entry}/update`), post()) : local(() => demo.updateContent(id, entry));
+export const checkContentUpdates = (id: string): Promise<ContentIndex> =>
+  live() ? request(content(id, '/check-updates'), post()) : local(() => demo.checkContentUpdates(id));
+
+function fileBody(file: File): FormData {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  return form;
+}
+
+export const uploadContent = (id: string, file: File): Promise<ContentIndex> =>
+  live()
+    ? request(content(id, '/upload'), { method: 'POST', body: fileBody(file) })
+    : local(() => demo.uploadContent(id, file.name, file.size));
+
+/** Imports a `.mrpack` as a new configuration; the job's `targetId` is it. */
+export const importModpack = (file: File): Promise<Job> =>
+  live()
+    ? request('/profiles/import', { method: 'POST', body: fileBody(file) })
+    : local(() => demo.importModpack(file.name));
 
 /* ------------------------------ instances ------------------------------ */
 
@@ -331,8 +412,13 @@ export const patchSchedule = (worldId: string, body: UpdateScheduleRequest): Pro
 
 /* ---------------------------- settings / system ------------------------ */
 
+export const getMe = (): Promise<Me> => (live() ? request('/me') : local(demo.getMe));
+export const updateMe = (body: UpdateMeRequest): Promise<Me> =>
+  live() ? request('/me', patch(body)) : local(() => demo.updateMe(body));
+export const listUsers = (): Promise<UserSummary[]> => (live() ? request('/users') : local(demo.getUsers));
+
 export const getSettings = (): Promise<AppSettings> => (live() ? request('/settings') : local(demo.getSettings));
 export const updateSettings = (body: UpdateSettingsRequest): Promise<AppSettings> =>
   live() ? request('/settings', patch(body)) : local(() => demo.updateSettings(body));
 export const getSystem = (): Promise<SystemInfo> => (live() ? request('/system') : local(demo.getSystem));
-export const listJobs = (): Promise<Job[]> => (live() ? request('/jobs') : local(() => [] as Job[]));
+export const listJobs = (): Promise<Job[]> => (live() ? request('/jobs') : local(demo.getJobs));

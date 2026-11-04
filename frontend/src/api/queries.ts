@@ -9,6 +9,8 @@
 
 import { useEffect, useState } from 'react';
 import {
+  keepPreviousData,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -24,7 +26,15 @@ import type {
   CreateWorldRequest,
   Instance,
   InstanceStatus,
-  ModIndex,
+  ContentIndex,
+  ContentRef,
+  ContentSearchResult,
+  ContentSource,
+  ContentVersion,
+  InstallPlan,
+  Me,
+  UpdateMeRequest,
+  UserSummary,
   Profile,
   PropertyFile,
   ServerAction,
@@ -53,7 +63,10 @@ export const keys = {
   profiles: ['profiles'] as const,
   profile: (id: string) => ['profiles', id] as const,
   profileProperties: (id: string) => ['profiles', id, 'properties'] as const,
-  profileMods: (id: string) => ['profiles', id, 'mods'] as const,
+  profileContent: (id: string) => ['profiles', id, 'content'] as const,
+  contentSearch: (id: string, q: string, sort: string) => ['profiles', id, 'content', 'search', q, sort] as const,
+  contentVersions: (id: string, provider: string, project: string) =>
+    ['profiles', id, 'content', 'versions', provider, project] as const,
   software: ['profiles', 'software'] as const,
 
   instances: ['instances'] as const,
@@ -66,6 +79,8 @@ export const keys = {
   jobs: ['jobs'] as const,
   settings: ['settings'] as const,
   system: ['system'] as const,
+  me: ['me'] as const,
+  users: ['users'] as const,
 };
 
 /* -------------------------------- events ------------------------------- */
@@ -147,7 +162,13 @@ export function useSystem(): UseQueryResult<SystemInfo> {
 }
 
 export function useJobs(): UseQueryResult<Job[]> {
-  return useQuery({ queryKey: keys.jobs, queryFn: api.listJobs });
+  return useQuery({
+    queryKey: keys.jobs,
+    queryFn: api.listJobs,
+    // Live mode hears job progress over `/events`; this catches the demo up.
+    refetchInterval: (query) =>
+      query.state.data?.some((job) => job.state === 'running' || job.state === 'queued') ? 1500 : false,
+  });
 }
 
 /** The job currently working on an asset, if any. */
@@ -296,44 +317,103 @@ export function useSaveProfileProperties(
   });
 }
 
-export function useProfileMods(profileId: string): UseQueryResult<ModIndex> {
+/* --------------------------- mods and plugins -------------------------- */
+
+export function useContent(profileId: string): UseQueryResult<ContentIndex> {
   return useQuery({
-    queryKey: keys.profileMods(profileId),
-    queryFn: () => api.getProfileMods(profileId),
+    queryKey: keys.profileContent(profileId),
+    queryFn: () => api.getContent(profileId),
     enabled: !!profileId,
   });
 }
 
-export function useInstallMod(profileId: string): UseMutationResult<ModIndex, Error, string> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (modId: string) => api.installMod(profileId, modId),
-    onSuccess: (data) => queryClient.setQueryData(keys.profileMods(profileId), data),
+/** Paged search; `fetchNextPage` loads more. */
+export function useContentSearch(profileId: string, q: string, sort: api.ContentSearchParams['sort'] = 'relevance') {
+  return useInfiniteQuery({
+    queryKey: keys.contentSearch(profileId, q, sort ?? 'relevance'),
+    queryFn: ({ pageParam }) => api.searchContent(profileId, { q, sort, offset: pageParam, limit: 20 }),
+    initialPageParam: 0,
+    getNextPageParam: (last: ContentSearchResult) =>
+      last.offset + last.hits.length < last.total ? last.offset + last.hits.length : undefined,
+    placeholderData: keepPreviousData,
+    enabled: !!profileId,
+    staleTime: 60_000,
   });
 }
 
-export function useUninstallMod(profileId: string): UseMutationResult<ModIndex, Error, string> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (modId: string) => api.uninstallMod(profileId, modId),
-    onSuccess: (data) => queryClient.setQueryData(keys.profileMods(profileId), data),
+export function useContentVersions(
+  profileId: string,
+  provider: ContentSource,
+  project: string | null,
+): UseQueryResult<ContentVersion[]> {
+  return useQuery({
+    queryKey: keys.contentVersions(profileId, provider, project ?? ''),
+    queryFn: () => api.getContentVersions(profileId, provider, project!),
+    enabled: !!profileId && !!project,
+    staleTime: 60_000,
   });
 }
 
-export function useToggleMod(profileId: string): UseMutationResult<ModIndex, Error, { modId: string; enabled: boolean }> {
+export function usePlanContent(profileId: string): UseMutationResult<InstallPlan, Error, ContentRef[]> {
+  return useMutation({ mutationFn: (items: ContentRef[]) => api.planContent(profileId, { items }) });
+}
+
+/** Mutations that answer with the profile's new content index. */
+function useContentMutation<T>(profileId: string, fn: (arg: T) => Promise<ContentIndex>) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ modId, enabled }: { modId: string; enabled: boolean }) => api.patchMod(profileId, modId, enabled),
-    onSuccess: (data) => queryClient.setQueryData(keys.profileMods(profileId), data),
+    mutationFn: fn,
+    onSuccess: (data: ContentIndex) => {
+      queryClient.setQueryData(keys.profileContent(profileId), data);
+      // Search results mark what's installed.
+      void queryClient.invalidateQueries({ queryKey: [...keys.profileContent(profileId), 'search'] });
+      void queryClient.invalidateQueries({ queryKey: keys.jobs });
+    },
   });
 }
 
-export function useUpdateMod(profileId: string): UseMutationResult<ModIndex, Error, string> {
+export const useApplyContent = (profileId: string) =>
+  useContentMutation(profileId, (items: ContentRef[]) => api.applyContent(profileId, items));
+export const useSetContentEnabled = (profileId: string) =>
+  useContentMutation(profileId, ({ entry, enabled }: { entry: string; enabled: boolean }) =>
+    api.setContentEnabled(profileId, entry, enabled),
+  );
+export const useRemoveContent = (profileId: string) =>
+  useContentMutation(profileId, (entry: string) => api.removeContent(profileId, entry));
+export const useUpdateContent = (profileId: string) =>
+  useContentMutation(profileId, (entry: string) => api.updateContent(profileId, entry));
+export const useCheckContentUpdates = (profileId: string) =>
+  useContentMutation(profileId, (_: void) => api.checkContentUpdates(profileId));
+export const useUploadContent = (profileId: string) =>
+  useContentMutation(profileId, (file: File) => api.uploadContent(profileId, file));
+
+export function useImportModpack(): UseMutationResult<Job, Error, File> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (modId: string) => api.updateMod(profileId, modId),
-    onSuccess: (data) => queryClient.setQueryData(keys.profileMods(profileId), data),
+    mutationFn: api.importModpack,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.profiles });
+      void queryClient.invalidateQueries({ queryKey: keys.jobs });
+    },
   });
+}
+
+/* -------------------------------- account ------------------------------ */
+
+export function useMe(): UseQueryResult<Me> {
+  return useQuery({ queryKey: keys.me, queryFn: api.getMe, staleTime: 60_000, retry: false });
+}
+
+export function useUpdateMe(): UseMutationResult<Me, Error, UpdateMeRequest> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.updateMe,
+    onSuccess: (data) => queryClient.setQueryData(keys.me, data),
+  });
+}
+
+export function useUsers(enabled: boolean): UseQueryResult<UserSummary[]> {
+  return useQuery({ queryKey: keys.users, queryFn: api.listUsers, enabled });
 }
 
 /* ------------------------------ instances ------------------------------ */

@@ -17,6 +17,15 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     NotImplemented(String),
+    /// Not signed in (or the token is bad): sign in again.
+    #[error("{0}")]
+    Unauthorized(String),
+    /// Signed in, but not allowed.
+    #[error("{0}")]
+    Forbidden(String),
+    /// Can't check right now (the identity provider is down): retry.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -32,6 +41,10 @@ impl AppError {
         Self::Conflict { code, message: message.into() }
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden(message.into())
+    }
+
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::BadRequest(message.into())
     }
@@ -42,6 +55,9 @@ impl AppError {
             Self::Conflict { code, .. } => (StatusCode::CONFLICT, code),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
+            Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            Self::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

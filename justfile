@@ -24,7 +24,7 @@ dev:
 
 # Backend only, simulated runtime, serving the built frontend on :7878.
 serve-fake: build-web
-    cd backend && cargo run --bin lodestone -- --runtime fake --providers fake --accept-eula --static-dir ../frontend/dist
+    cd backend && cargo run --bin lodestone -- --runtime fake --providers fake --accept-eula --dev-user dev --static-dir ../frontend/dist
 
 # Production-mode frontend build (talks to the backend, no demo fallback).
 build-web:

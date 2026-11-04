@@ -2,9 +2,11 @@
 
 pub mod api;
 pub mod app;
+pub mod auth;
 pub mod backups;
 pub mod cache;
 pub mod config;
+pub mod content;
 pub mod error;
 pub mod events;
 pub mod host;

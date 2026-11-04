@@ -31,7 +31,7 @@ export function BevelButton({
     <Button
       variant='ghost'
       className={cn(
-        'bevel bg-(--bevel-base)! font-semibold uppercase text-accent-foreground hover:bg-(--bevel-base)!',
+        'bevel bg-(--bevel-base)! font-semibold uppercase text-white! hover:bg-(--bevel-base)! hover:text-white! aria-expanded:text-white!',
         TONE[tone],
         className,
       )}

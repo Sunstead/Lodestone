@@ -54,6 +54,8 @@ import {
   useInstances,
   useProfiles,
   useSoftware,
+  useImportModpack,
+  useJobs,
 } from '#/api/queries';
 import type { CreateProfileRequest, Instance, Profile, ServerSoftwareId } from '#/api/types';
 import { EmptyState, ScrollTable, SectionHeading } from '#/components/page-parts';
@@ -69,7 +71,8 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { FileArchive, Loader2 } from 'lucide-react';
 
 const EMPTY_DRAFT: CreateProfileRequest = {
   name: '',
@@ -157,7 +160,7 @@ function ProfileDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className='max-h-[60vh] space-y-4 overflow-y-auto pr-1'>
+        <div className='-mx-1 max-h-[60vh] min-w-0 space-y-4 overflow-x-hidden overflow-y-auto px-1 pb-1'>
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor='profile-name'>Name</FieldLabel>
@@ -321,6 +324,20 @@ export function ProfilesPage({
   const remove = useDeleteProfile();
   const [createOpen, setCreateOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Profile | null>(null);
+  const importPack = useImportModpack();
+  const jobs = useJobs();
+  const packInput = useRef<HTMLInputElement>(null);
+  const [importJobId, setImportJobId] = useState<string | null>(null);
+  const importJob = jobs.data?.find((job) => job.id === importJobId) ?? (importPack.data?.id === importJobId ? importPack.data : undefined);
+  const importing = importPack.isPending || importJob?.state === 'running' || importJob?.state === 'queued';
+
+  // Open the new configuration once its modpack has been read.
+  useEffect(() => {
+    if (importJob?.state === 'succeeded') {
+      setImportJobId(null);
+      onOpenProfile(importJob.targetId);
+    }
+  }, [importJob?.state]);
 
   const list = profiles.data ?? [];
   const attached = useMemo(() => list.filter((profile) => profile.instanceCount > 0).length, [list]);
@@ -351,12 +368,39 @@ export function ProfilesPage({
         icon={Box}
         description={`${list.length} configuration${list.length === 1 ? '' : 's'} · ${attached} used by a server`}
         action={
-          <BevelButton className='px-5 py-5 text-base' onClick={() => setCreateOpen(true)}>
-            <Plus />
-            Create configuration
-          </BevelButton>
+          <>
+            <Button variant='outline' disabled={importing} onClick={() => packInput.current?.click()}>
+              {importing ? <Loader2 className='animate-spin' /> : <FileArchive />}
+              Import modpack
+            </Button>
+            <input
+              ref={packInput}
+              type='file'
+              accept='.mrpack'
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) importPack.mutate(file, { onSuccess: (job) => setImportJobId(job.id) });
+                event.target.value = '';
+              }}
+            />
+            <BevelButton className='px-5 py-5 text-base' onClick={() => setCreateOpen(true)}>
+              <Plus />
+              Create configuration
+            </BevelButton>
+          </>
         }
       />
+
+      {importing || importJob?.state === 'failed' || importPack.error ? (
+        <p role='status' className={importJob?.state === 'failed' || importPack.error ? 'text-sm text-destructive' : 'text-sm text-muted-foreground'}>
+          {importPack.error
+            ? importPack.error.message
+            : importJob?.state === 'failed'
+              ? `Import failed: ${importJob.error ?? importJob.message}`
+              : `${importJob?.message ?? 'Uploading the modpack'}${importJob?.progress != null && importJob.state === 'running' ? ` · ${Math.round(importJob.progress * 100)}%` : ''}`}
+        </p>
+      ) : null}
 
       {list.length === 0 ? (
         <Card>

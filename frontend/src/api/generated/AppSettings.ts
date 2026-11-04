@@ -4,8 +4,4 @@ export type AppSettings = {
 /**
  * Host players type to connect, e.g. `play.example.com`. Blank = `localhost`.
  */
-publicAddress: string, 
-/**
- * The admin has accepted the Minecraft EULA (https://aka.ms/MinecraftEULA).
- */
-eulaAccepted: boolean, defaultJavaArgs: string, };
+publicAddress: string, defaultJavaArgs: string, };

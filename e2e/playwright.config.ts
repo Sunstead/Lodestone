@@ -43,7 +43,7 @@ export default defineConfig({
         'rm -rf ../.lodestone-e2e/fake &&',
         'cargo run --quiet --manifest-path ../backend/Cargo.toml --bin lodestone --',
         `--bind 127.0.0.1:${FAKE_PORT} --data-dir ../.lodestone-e2e/fake`,
-        '--runtime fake --providers fake --accept-eula --fake-speed 0.1',
+        '--runtime fake --providers fake --accept-eula --dev-user dev --fake-speed 0.1',
         '--static-dir ../frontend/dist',
       ].join(' '),
       url: `http://127.0.0.1:${FAKE_PORT}/api/v1/health`,

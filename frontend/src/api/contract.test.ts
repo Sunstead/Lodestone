@@ -69,8 +69,8 @@ describe.each(targets)('contract: $name', ({ mode, base }) => {
     api = await import('./client');
     api.forceMode(mode);
     if (mode === 'live') {
-      // A fresh backend has not accepted the EULA unless told to.
-      await api.updateSettings({ eulaAccepted: true });
+      // The dev user accepts the EULA for their own servers.
+      await api.updateMe({ eulaAccepted: true });
     }
   });
 
@@ -182,9 +182,66 @@ describe.each(targets)('contract: $name', ({ mode, base }) => {
   it('reads and writes app settings', async () => {
     const settings = await api.updateSettings({ publicAddress: 'play.example.com' });
     expect(settings.publicAddress).toBe('play.example.com');
-    expect((await api.getSettings()).eulaAccepted).toBe(true);
+    expect((await api.getMe()).eulaAccepted).toBe(true);
     const system = await api.getSystem();
     expect(system.runtime.available).toBe(true);
     await api.updateSettings({ publicAddress: '' });
+  });
+
+  it('says who is signed in', async () => {
+    const me = await api.getMe();
+    expect(me.user).toMatchObject({ id: expect.any(String), username: expect.any(String), admin: true });
+    expect(me.auth.mode).toBe('dev');
+    const users = await api.listUsers();
+    expect(users.some((row) => row.user.id === me.user.id)).toBe(true);
+  });
+
+  it('searches, plans and installs plugins with their dependencies', async () => {
+    const profile = await api.createProfile(profileSpec(`Plugins ${unique()}`));
+    const empty = await api.getContent(profile.id);
+    expect(empty).toMatchObject({ kind: 'plugins', loaders: ['paper', 'spigot', 'bukkit'], gameVersion: '1.21.4', entries: [] });
+
+    const results = await api.searchContent(profile.id, { q: 'guard' });
+    expect(results.hits[0]).toMatchObject({ name: 'WorldGuard', kind: 'plugin', installed: false });
+    expect((await api.searchContent(profile.id, { q: 'lithium' })).total).toBe(0);
+
+    const versions = await api.getContentVersions(profile.id, 'modrinth', results.hits[0].id);
+    expect(versions.every((version) => version.compatible)).toBe(true);
+
+    const plan = await api.planContent(profile.id, { items: [{ provider: 'modrinth', projectId: results.hits[0].id }] });
+    expect(plan.install.map((item) => [item.name, item.requiredBy])).toEqual([
+      ['WorldGuard', null],
+      ['WorldEdit', 'WorldGuard'],
+    ]);
+    expect(plan.conflicts).toEqual([]);
+
+    const index = await api.applyContent(
+      profile.id,
+      plan.install.map((item) => ({ provider: item.provider, projectId: item.projectId, versionId: item.versionId })),
+    );
+    const worldedit = index.entries.find((entry) => entry.name === 'WorldEdit');
+    expect(worldedit).toMatchObject({ dependency: true, requiredBy: ['WorldGuard'], compatible: true, enabled: true });
+
+    const conflict = await api.planContent(profile.id, { items: [{ provider: 'modrinth', projectId: 'fk-coreprotect' }] });
+    expect(conflict.conflicts[0].message).toBe('CoreProtect has no version for Paper 1.21.4.');
+  });
+
+  it('checks for updates, updates, toggles and removes', async () => {
+    const profile = await api.createProfile(profileSpec(`Updates ${unique()}`));
+    let index = await api.applyContent(profile.id, [
+      { provider: 'modrinth', projectId: 'fk-worldedit', versionId: 'fk-worldedit-7.3.9' },
+    ]);
+    const entry = index.entries[0].id;
+    index = await api.checkContentUpdates(profile.id);
+    expect(index.entries[0].update).toMatchObject({ versionName: '7.3.10' });
+    expect(index.checkedAt).toEqual(expect.any(String));
+
+    index = await api.updateContent(profile.id, entry);
+    expect(index.entries[0]).toMatchObject({ id: entry, versionName: '7.3.10', update: null });
+
+    index = await api.setContentEnabled(profile.id, entry, false);
+    expect(index.entries[0].enabled).toBe(false);
+    index = await api.removeContent(profile.id, entry);
+    expect(index.entries).toEqual([]);
   });
 });

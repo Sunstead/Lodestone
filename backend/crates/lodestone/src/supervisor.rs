@@ -187,6 +187,18 @@ fn set_state(app: &AppState, slot: &Slot, state: ServerState) {
 /* start                                                                    */
 /* ------------------------------------------------------------------------ */
 
+/// Whether the instance's owner has accepted the Minecraft EULA. Lodestone
+/// only writes `eula.txt` for them once they have.
+pub async fn eula_accepted(app: &AppState, instance_id: &str) -> AppResult<bool> {
+    if app.config.accept_eula {
+        return Ok(true);
+    }
+    match app.store.owner_of(crate::store::Asset::Instance, instance_id).await? {
+        Some(owner) => Ok(app.store.get_user(&owner).await?.eula_accepted_at.is_some()),
+        None => Ok(false),
+    }
+}
+
 /// Starts an instance. Returns once the instance is `preparing`; the rest
 /// (downloads, launch, waiting for "Done") continues in the background.
 pub async fn start(app: &AppState, id: &str) -> AppResult<()> {
@@ -199,7 +211,7 @@ pub async fn start(app: &AppState, id: &str) -> AppResult<()> {
     let profile = app.store.get_profile(&record.profile_id).await?;
     let world = app.store.get_world(&record.world_id).await?;
 
-    if !app.store.settings().await?.eula_accepted {
+    if !eula_accepted(app, id).await? {
         return Err(AppError::conflict(
             "eula_required",
             "Accept the Minecraft EULA (https://aka.ms/MinecraftEULA) in Settings before starting a server.",
@@ -350,14 +362,28 @@ async fn prepare(
         Mount { host: jar, container: "/server/server.jar".into(), read_only: true },
         Mount { host: universe, container: "/server/worlds".into(), read_only: false },
     ];
+    // The profile's mods or plugins, from its lockfile.
+    job.progress(None, "Placing mods and plugins").await;
+    crate::content::install::sync_files(app, &p.id, Some(job)).await?;
+
     // Plugin and mod folders belong to the profile, so their configs persist
-    // across instances that share it.
-    let content_dirs: &[&str] = match p.software_id.content_kind() {
-        crate::model::ContentKind::Plugins => &["plugins"],
-        crate::model::ContentKind::Mods => &["mods", "config"],
-        crate::model::ContentKind::Vanilla => &[],
+    // across instances that share it. Any other folder a modpack brought
+    // (`config/`, `defaultconfigs/`, `kubejs/`, ...) is mounted too.
+    let mut content_dirs: Vec<String> = match p.software_id.content_kind() {
+        crate::model::ContentKind::Plugins => vec!["plugins".into()],
+        crate::model::ContentKind::Mods => vec!["mods".into(), "config".into()],
+        crate::model::ContentKind::Vanilla => vec![],
     };
-    for name in content_dirs {
+    if let Ok(mut entries) = tokio::fs::read_dir(&profile_dir).await {
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let reserved = RESERVED_DIRS.contains(&name.as_str()) || name.starts_with('.');
+            if entry.file_type().await?.is_dir() && !reserved && !content_dirs.contains(&name) {
+                content_dirs.push(name);
+            }
+        }
+    }
+    for name in &content_dirs {
         let host = profile_dir.join(name);
         tokio::fs::create_dir_all(&host).await?;
         mounts.push(Mount { host, container: format!("/server/{name}"), read_only: false });
@@ -396,6 +422,9 @@ async fn prepare(
     })
 }
 
+/// Run-dir paths a profile folder may not shadow.
+const RESERVED_DIRS: &[&str] = &["worlds", "logs", "crash-reports", "libraries", "versions", "cache"];
+
 async fn write_run_files(
     run_dir: &std::path::Path,
     record: &InstanceRecord,
@@ -404,10 +433,10 @@ async fn write_run_files(
 ) -> AppResult<()> {
     let props = properties::render(world, &profile.properties, &record.rcon_password, record.ports.query.is_some());
     tokio::fs::write(run_dir.join("server.properties"), props).await?;
-    // Only written because the admin accepted the EULA in Lodestone.
+    // Only written because the server's owner accepted the EULA in Lodestone.
     tokio::fs::write(
         run_dir.join("eula.txt"),
-        "# Accepted by the Lodestone admin (https://aka.ms/MinecraftEULA)\neula=true\n",
+        "# Accepted by this server's owner in Lodestone (https://aka.ms/MinecraftEULA)\neula=true\n",
     )
     .await?;
 
@@ -925,7 +954,7 @@ pub async fn world_time(app: &AppState, instance_id: &str) -> Option<(i64, Strin
 /// Re-attaches to servers that outlived a Lodestone restart, then starts
 /// instances whose profile asks for it.
 pub async fn reconcile(app: &AppState) -> AppResult<()> {
-    for record in app.store.list_instances().await? {
+    for record in app.store.list_instances(None).await? {
         let slot = app.instances.slot(&record.id);
         match app.runtime.adopt(&record.id).await {
             Ok(Some(process)) => {

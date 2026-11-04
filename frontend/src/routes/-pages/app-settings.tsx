@@ -19,13 +19,14 @@ import { Switch } from '@sunstead/ui/components/switch';
 import { THEMES, themesOf } from '@sunstead/ui/themes';
 import { useTheme } from '@sunstead/ui/use-theme';
 import { Input } from '@sunstead/ui/components/input';
-import { detectMode, getMode, isBackendReachable, onModeChange } from '#/api/client';
-import { useSettings, useSystem, useUpdateSettings } from '#/api/queries';
+import { detectMode, getMode, isBackendReachable, onModeChange, signOut } from '#/api/client';
+import { useMe, useSettings, useSystem, useUpdateMe, useUpdateSettings, useUsers } from '#/api/queries';
 import type { ApiMode } from '#/api/types';
 import { formatBytes } from '#/lib/format';
 import { KeyValue, SectionHeading } from '#/components/page-parts';
 import { BevelButton } from '#/components/server-hero';
-import { Globe, Palette, RefreshCw, Scale, Server, ShieldCheck } from 'lucide-react';
+import { Globe, LogOut, Palette, RefreshCw, Scale, Server, ShieldCheck, UserRound, Users } from 'lucide-react';
+import { formatRelative } from '#/lib/format';
 import { useEffect, useState } from 'react';
 
 /**
@@ -39,6 +40,10 @@ export function AppSettingsPage() {
   const settings = useSettings();
   const updateSettings = useUpdateSettings();
   const system = useSystem();
+  const me = useMe();
+  const updateMe = useUpdateMe();
+  const admin = me.data?.user.admin ?? false;
+  const users = useUsers(admin);
   const [address, setAddress] = useState('');
 
   useEffect(() => {
@@ -65,6 +70,33 @@ export function AppSettingsPage() {
         icon={Server}
         description='Preferences for Lodestone itself. Worlds and configurations keep their own settings.'
       />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className='flex items-center gap-2'>
+            <UserRound className='size-4' /> Account
+          </CardTitle>
+          <CardDescription>
+            {me.data?.auth.mode === 'dev'
+              ? 'Development mode: there is no sign-in, and everyone is this admin.'
+              : 'Signed in through your identity provider. Your worlds, configurations and servers are yours alone.'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className='flex flex-wrap items-center justify-between gap-3'>
+          <div className='min-w-0'>
+            <p className='flex items-center gap-2 font-medium'>
+              {me.data?.user.displayName ?? '—'}
+              {admin ? <Badge variant='secondary'>Admin</Badge> : null}
+            </p>
+            <p className='text-sm text-muted-foreground'>@{me.data?.user.username ?? '—'}</p>
+          </div>
+          {me.data?.auth.mode === 'oidc' ? (
+            <Button variant='outline' onClick={() => void signOut()}>
+              <LogOut /> Sign out
+            </Button>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <div className='grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]'>
         <Card>
@@ -196,12 +228,12 @@ export function AppSettingsPage() {
               <Scale className='size-4' /> Minecraft EULA
             </CardTitle>
             <CardDescription>
-              Lodestone downloads server software from Mojang and others when a server first starts. Servers
+              Lodestone downloads server software from Mojang and others when a server first starts. Your servers
               only run after you accept the{' '}
               <a className='underline' href='https://aka.ms/MinecraftEULA' target='_blank' rel='noreferrer'>
                 Minecraft End User License Agreement
               </a>
-              .
+              . Everyone accepts it for their own servers.
             </CardDescription>
           </CardHeader>
           <CardContent className='flex items-center justify-between gap-3'>
@@ -210,9 +242,9 @@ export function AppSettingsPage() {
             </label>
             <Switch
               id='eula'
-              checked={settings.data?.eulaAccepted ?? false}
-              disabled={!settings.data || updateSettings.isPending}
-              onCheckedChange={(checked: boolean) => updateSettings.mutate({ eulaAccepted: checked })}
+              checked={me.data?.eulaAccepted ?? false}
+              disabled={!me.data || updateMe.isPending}
+              onCheckedChange={(checked: boolean) => updateMe.mutate({ eulaAccepted: checked })}
             />
           </CardContent>
         </Card>
@@ -224,7 +256,7 @@ export function AppSettingsPage() {
             </CardTitle>
             <CardDescription>
               The host name players type to connect. Shown on every server with its port. Leave blank for
-              localhost.
+              localhost.{admin ? '' : ' Only admins can change it.'}
             </CardDescription>
           </CardHeader>
           <CardContent className='flex gap-2'>
@@ -232,11 +264,12 @@ export function AppSettingsPage() {
               aria-label='Public address'
               placeholder='play.example.com'
               value={address}
+              disabled={!admin}
               onChange={(event) => setAddress(event.target.value)}
             />
             <Button
               variant='outline'
-              disabled={!settings.data || address === settings.data.publicAddress || updateSettings.isPending}
+              disabled={!admin || !settings.data || address === settings.data.publicAddress || updateSettings.isPending}
               onClick={() => updateSettings.mutate({ publicAddress: address })}
             >
               Save
@@ -249,6 +282,41 @@ export function AppSettingsPage() {
           ) : null}
         </Card>
       </div>
+
+      {admin ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className='flex items-center gap-2'>
+              <Users className='size-4' /> People
+            </CardTitle>
+            <CardDescription>
+              Everyone who has signed in. Access and admin rights come from groups in your identity provider.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {users.error ? <p className='text-sm text-destructive'>{users.error.message}</p> : null}
+            <ul className='divide-y'>
+              {(users.data ?? []).map((row) => (
+                <li key={row.user.id} className='flex flex-wrap items-center gap-x-4 gap-y-1 py-2.5 text-sm'>
+                  <div className='min-w-40 flex-1'>
+                    <p className='flex items-center gap-2 font-medium'>
+                      {row.user.displayName}
+                      {row.user.admin ? <Badge variant='secondary'>Admin</Badge> : null}
+                    </p>
+                    <p className='text-xs text-muted-foreground'>
+                      @{row.user.username} · last seen {formatRelative(row.lastSeenAt)}
+                    </p>
+                  </div>
+                  <span className='text-muted-foreground tabular-nums'>
+                    {row.instances} servers · {row.worlds} worlds · {row.profiles} configurations
+                  </span>
+                  {!row.eulaAccepted ? <Badge variant='outline'>EULA not accepted</Badge> : null}
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

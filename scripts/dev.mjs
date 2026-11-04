@@ -24,6 +24,9 @@ const backendArgs =
   kind === 'fake'
     ? ['--runtime', 'fake', '--providers', 'fake', '--accept-eula', '--data-dir', join(root, '.lodestone-dev')]
     : ['--runtime', 'docker', '--providers', 'real', '--data-dir', join(root, '.lodestone-dev-real')];
+// Sign in through Authentik when LODESTONE_OIDC_ISSUER is set (with
+// LODESTONE_PUBLIC_URL=http://localhost:3000); otherwise everyone is `dev`.
+if (!process.env.LODESTONE_OIDC_ISSUER) backendArgs.push('--dev-user', process.env.LODESTONE_DEV_USER ?? 'dev');
 
 const colors = { api: '\x1b[35m', web: '\x1b[36m' };
 const children = [];

@@ -5,9 +5,14 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::Router;
 
+use crate::auth::web::CookieSpec;
+use crate::auth::{self, Auth};
 use crate::backups;
 use crate::cache::BlobCache;
 use crate::config::{Config, ProviderKind, RuntimeKind};
+use crate::content::fake::FakeContent;
+use crate::content::modrinth::{self, Modrinth};
+use crate::content::{ContentProvider, Providers};
 use crate::events::EventBus;
 use crate::host::HostSampler;
 use crate::jobs::Jobs;
@@ -24,6 +29,12 @@ use crate::supervisor::{self, InstanceManager};
 /// Everything a request handler or background task needs.
 pub struct Services {
     pub config: Config,
+    pub auth: Arc<Auth>,
+    pub cookie: CookieSpec,
+    /// Mod and plugin sources.
+    pub content: Providers,
+    /// Serialises changes to profiles' lockfiles.
+    pub content_lock: tokio::sync::Mutex<()>,
     pub paths: Paths,
     pub store: Store,
     pub events: EventBus,
@@ -42,13 +53,6 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     paths.ensure().with_context(|| format!("creating data dir {}", config.data_dir.display()))?;
     let store = Store::open(&paths.database()).await.context("opening lodestone.db")?;
     store.fail_interrupted_jobs().await?;
-    if config.accept_eula {
-        let mut settings = store.settings().await?;
-        if !settings.eula_accepted {
-            settings.eula_accepted = true;
-            store.put_settings(&settings).await?;
-        }
-    }
 
     let events = EventBus::new();
     let http = match config.providers {
@@ -71,12 +75,29 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             Endpoints::default(),
         )),
     };
+    let content: Vec<Arc<dyn ContentProvider>> = match config.providers {
+        ProviderKind::Fake => vec![Arc::new(FakeContent::default())],
+        ProviderKind::Real => {
+            vec![Arc::new(Modrinth::new(http.clone().expect("real providers have an HTTP client"), modrinth::API))]
+        }
+    };
+    let auth = Arc::new(Auth::new(&config.auth));
+    auth.start();
+    if let Auth::Dev { username } = &*auth {
+        // Assets from before sign-in existed belong to the dev user.
+        let user = auth::dev_user(&store, username).await?;
+        store.claim_orphans(&user.id).await?;
+    }
     let runtime: Arc<dyn Runtime> = match config.runtime {
         RuntimeKind::Fake => Arc::new(FakeRuntime::new(config.fake_speed, config.fake_speed > 0.0)),
         RuntimeKind::Docker => Arc::new(DockerRuntime::connect(&config.data_dir, config.host_data_dir.clone())),
     };
 
     Ok(Arc::new(Services {
+        cookie: CookieSpec::for_url(config.public_url.as_ref()),
+        auth,
+        content: Providers::new(content),
+        content_lock: tokio::sync::Mutex::new(()),
         jobs: Jobs::new(store.clone(), events.clone()),
         cache: BlobCache::new(paths.blobs(), http),
         host: HostSampler::start(config.data_dir.clone()),

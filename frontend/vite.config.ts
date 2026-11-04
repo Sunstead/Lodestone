@@ -27,6 +27,11 @@ const config = defineConfig({
         target: process.env.LODESTONE_API ?? 'http://127.0.0.1:7878',
         changeOrigin: false,
       },
+      // Sign-in (OIDC redirects and the session cookie) is served by the backend.
+      '/auth': {
+        target: process.env.LODESTONE_API ?? 'http://127.0.0.1:7878',
+        changeOrigin: false,
+      },
     },
   },
   plugins: [

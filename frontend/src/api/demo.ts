@@ -20,8 +20,19 @@ import type {
   Backup,
   BackupIndex,
   BanEntry,
-  CatalogEntry,
   ConsoleLine,
+  ContentIndex,
+  ContentPlanRequest,
+  ContentRef,
+  ContentSearchResult,
+  ContentSource,
+  ContentVersion,
+  InstallPlan,
+  Job,
+  Me,
+  UpdateMeRequest,
+  UserInfo,
+  UserSummary,
   CreateInstanceRequest,
   CreateProfileRequest,
   CreateWorldRequest,
@@ -31,8 +42,6 @@ import type {
   InstanceStatus,
   LevelType,
   LogLevel,
-  ModEntry,
-  ModIndex,
   Player,
   Profile,
   PropertyField,
@@ -53,6 +62,7 @@ import type {
   UpdateWorldRequest,
 } from './types';
 import schema from '../../../shared/server-properties.schema.json';
+import * as demoContent from './demo-content';
 
 /* ------------------------------------------------------------------ *
  * helpers
@@ -227,7 +237,6 @@ interface DemoInstance {
 interface DemoProfile {
   profile: Profile;
   properties: PropertyField[];
-  mods: ModIndex;
 }
 
 interface DemoWorld {
@@ -335,84 +344,6 @@ function backup(
     sizeBytes: Math.round(sizeGb * 1024 ** 3),
     status,
     instanceId,
-  };
-}
-
-function plugin(
-  id: string,
-  name: string,
-  version: string,
-  source: ModEntry['source'],
-  author: string,
-  description: string,
-  sizeKb: number,
-  downloads: number,
-  extra: Partial<ModEntry> = {},
-): ModEntry {
-  return {
-    id,
-    name,
-    version,
-    kind: 'plugin',
-    source,
-    author,
-    description,
-    sizeBytes: sizeKb * 1024,
-    downloads,
-    enabled: true,
-    ...extra,
-  };
-}
-
-function mod(
-  id: string,
-  name: string,
-  version: string,
-  source: ModEntry['source'],
-  author: string,
-  description: string,
-  sizeKb: number,
-  downloads: number,
-  extra: Partial<ModEntry> = {},
-): ModEntry {
-  return {
-    id,
-    name,
-    version,
-    kind: 'mod',
-    source,
-    author,
-    description,
-    sizeBytes: sizeKb * 1024,
-    downloads,
-    enabled: true,
-    ...extra,
-  };
-}
-
-function catalogEntry(
-  id: string,
-  name: string,
-  author: string,
-  description: string,
-  kind: ModEntry['kind'],
-  source: ModEntry['source'],
-  version: string,
-  sizeKb: number,
-  downloads: number,
-  categories: string[],
-): CatalogEntry {
-  return {
-    id,
-    name,
-    author,
-    description,
-    kind,
-    source,
-    latestVersion: version,
-    sizeBytes: sizeKb * 1024,
-    downloads,
-    categories,
   };
 }
 
@@ -691,28 +622,9 @@ interface ProfileSeed {
   createdAt: string;
   updatedAt: string;
   properties: Record<string, string>;
-  mods: ModIndex;
+  /** Installed content: exact versions from shared/fake-content.json. */
+  content?: { versions: string[]; disabled?: string[] };
 }
-
-const PAPER_PLUGIN_CATALOG: CatalogEntry[] = [
-  catalogEntry('geyser', 'Geyser', 'GeyserMC', 'Let Bedrock players join this Java server.', 'plugin', 'modrinth', '2.4.3', 4800, 34_000_000, ['proxy', 'crossplay']),
-  catalogEntry('floodgate', 'Floodgate', 'GeyserMC', 'Bedrock accounts join without a Java account.', 'plugin', 'modrinth', '2.2.3', 900, 21_000_000, ['proxy', 'crossplay']),
-  catalogEntry('plan', 'Plan', 'Plan Player Analytics', 'Player activity dashboards inside the server.', 'plugin', 'spigotmc', '5.6.1', 6400, 4_300_000, ['analytics']),
-  catalogEntry('worldguard', 'WorldGuard', 'EngineHub', 'Regions that protect builds from other players.', 'plugin', 'spigotmc', '7.0.10', 1100, 15_000_000, ['protection']),
-  catalogEntry('clearlagg', 'ClearLag', 'Mesphito', 'Removes leftover entities on a timer.', 'plugin', 'spigotmc', '3.2.1', 140, 8_900_000, ['performance']),
-  catalogEntry('tabtps', 'TabTPS', 'melopello', 'TPS and ping in the tab list.', 'plugin', 'modrinth', '1.5.12', 320, 2_700_000, ['performance', 'ui']),
-];
-
-const FABRIC_MOD_CATALOG: CatalogEntry[] = [
-  catalogEntry('distanthorizons', 'Distant Horizons', 'Distant Horizons Team', 'Level of detail terrain far past the view distance.', 'mod', 'modrinth', '2.3.2-b', 18_400, 41_000_000, ['performance', 'world']),
-  catalogEntry('modernfix', 'ModernFix', 'embeddedt', 'Hundreds of startup and memory fixes.', 'mod', 'modrinth', '5.20.0', 1900, 39_000_000, ['performance']),
-  catalogEntry('entityculling', 'Entity Culling', 'tr7zw', 'Skip rendering entities you cannot see.', 'mod', 'modrinth', '1.7.4', 140, 62_000_000, ['performance']),
-  catalogEntry('continuity', 'Continuity', 'PepperCode1', 'Connected textures without OptiFine.', 'mod', 'modrinth', '3.0.0', 320, 33_000_000, ['visual']),
-  catalogEntry('emi', 'EMI', 'emi', 'Recipe viewer with a searchable index.', 'mod', 'modrinth', '1.1.22', 1400, 51_000_000, ['ui']),
-  catalogEntry('xaerosminimap', "Xaero's Minimap", 'xaero96', 'Minimap with waypoints for every player.', 'mod', 'curseforge', '25.0.0', 2100, 120_000_000, ['ui']),
-  catalogEntry('appleskin', 'AppleSkin', 'squeek502', 'Shows saturation and food values.', 'mod', 'modrinth', '3.0.6', 90, 110_000_000, ['ui']),
-  catalogEntry('servux', 'Servux', 'Bloom', 'Debug helpers used by structure tools.', 'mod', 'modrinth', '0.4.0', 210, 4_600_000, ['utility']),
-];
 
 const PROFILE_SEEDS: ProfileSeed[] = [
   {
@@ -741,19 +653,9 @@ const PROFILE_SEEDS: ProfileSeed[] = [
       'rcon.password': '7f3c1a9d5e2b4860',
       'entity-broadcast-range-percentage': '100',
     },
-    mods: {
-      loader: 'Paper 1.21.4',
-      installed: [
-        plugin('luckperms', 'LuckPerms', '5.4.145', 'modrinth', 'Luck', 'Permissions, groups and prefixes.', 1420, 92_400_000),
-        plugin('essentialsx', 'EssentialsX', '2.21.0', 'spigotmc', 'Essentials Team', 'Homes, warps, kits, economy.', 2600, 41_000_000),
-        plugin('vault', 'Vault', '1.7.3', 'spigotmc', 'MilkBowl', 'Economy and permissions bridge.', 260, 68_000_000),
-        plugin('worldedit', 'WorldEdit', '7.3.9', 'modrinth', 'EngineHub', 'In-game world editing.', 5100, 120_000_000),
-        plugin('coreprotect', 'CoreProtect', '22.4', 'spigotmc', 'Intelli', 'Block logging and rollback.', 890, 12_800_000),
-        plugin('viaversion', 'ViaVersion', '5.2.1', 'modrinth', 'ViaVersion', 'Lets older clients join 1.21.4.', 1300, 64_000_000),
-        plugin('chunky', 'Chunky', '1.4.29', 'modrinth', 'pop4959', 'Pre-generates chunks up front.', 180, 6_100_000, { latestVersion: '1.4.31', updateAvailable: true }),
-        plugin('spark', 'spark', '1.10.133', 'modrinth', 'Luck', 'Profiler for tick and memory spikes.', 3200, 34_000_000),
-      ],
-      catalog: PAPER_PLUGIN_CATALOG,
+    content: {
+      versions: ['fk-worldedit-7.3.9', 'fk-worldguard-7.0.13', 'fk-luckperms-5.4.150', 'fk-vault-1.7.3', 'fk-essentialsx-2.21.0', 'fk-spark-1.10.119', 'fk-chunky-1.4.28'],
+      disabled: ['fk-chunky'],
     },
   },
   {
@@ -780,7 +682,6 @@ const PROFILE_SEEDS: ProfileSeed[] = [
       'rcon.password': 'a2f70c19d4e83b61',
       'white-list': 'false',
     },
-    mods: { loader: 'Paper 1.21.4', installed: [], catalog: PAPER_PLUGIN_CATALOG },
   },
   {
     id: 'vanilla-1-21-4',
@@ -806,7 +707,6 @@ const PROFILE_SEEDS: ProfileSeed[] = [
       'rcon.password': 'c1e9af204b7d3351',
       'player-idle-timeout': '30',
     },
-    mods: { loader: 'Vanilla 1.21.4', installed: [], catalog: [] },
   },
   {
     id: 'fabric-1-21-1-create',
@@ -833,19 +733,8 @@ const PROFILE_SEEDS: ProfileSeed[] = [
       'network-compression-threshold': '512',
       'entity-broadcast-range-percentage': '80',
     },
-    mods: {
-      loader: 'Fabric 1.21.1',
-      installed: [
-        mod('sodium', 'Sodium', '0.6.13', 'modrinth', 'CaffeineMC', 'Renderer rewrite, big FPS win.', 1200, 148_000_000),
-        mod('lithium', 'Lithium', '0.14.8', 'modrinth', 'CaffeineMC', 'General purpose server tick optimisations.', 640, 118_000_000),
-        mod('ferritecore', 'FerriteCore', '7.0.2', 'modrinth', 'malte0811', 'Cuts memory used by blocks and chunk data.', 190, 96_000_000),
-        mod('iris', 'Iris', '1.8.8', 'modrinth', 'Iris Shaders', 'Shader pack support, works with Sodium.', 3900, 78_000_000),
-        mod('create', 'Create', '6.0.4', 'modrinth', 'simibubi', 'Kinetic machines, trains and contraptions.', 24_600, 82_000_000, { latestVersion: '6.1.0', updateAvailable: true }),
-        mod('farmersdelight', "Farmer's Delight", '1.2.7', 'curseforge', 'vectorwing', 'Cooking expansion with real recipes.', 4100, 61_000_000, { enabled: false }),
-        mod('indium', 'Indium', '1.0.34', 'modrinth', 'comp500', 'Fabric rendering API for Sodium.', 120, 74_000_000),
-        mod('voicechat', 'Simple Voice Chat', '2.5.26', 'modrinth', 'henkelmax', 'Proximity voice chat on UDP.', 2400, 44_000_000),
-      ],
-      catalog: FABRIC_MOD_CATALOG,
+    content: {
+      versions: ['fk-fabric-api-0.116.1', 'fk-lithium-0.13.1', 'fk-ferritecore-7.1.1', 'fk-krypton-0.2.8', 'fk-ledger-1.3.8', 'fk-fabric-kotlin-1.13.1'],
     },
   },
 ];
@@ -1059,7 +948,8 @@ function hydrateProfile(seed: ProfileSeed): void {
     updatedAt: seed.updatedAt,
     instanceCount,
   };
-  profiles.set(seed.id, { profile, properties: buildFields(seed.properties), mods: seed.mods });
+  profiles.set(seed.id, { profile, properties: buildFields(seed.properties) });
+  if (seed.content) demoContent.seed(profile, seed.content.versions, seed.content.disabled);
 }
 
 function hydrateWorld(seed: WorldSeed): void {
@@ -1561,11 +1451,6 @@ export function createProfile(request: CreateProfileRequest): Profile {
       'rcon.password': Math.random().toString(36).slice(2, 18).padEnd(16, '0'),
       'rcon.port': String(profile.ports.rcon),
     }),
-    mods: {
-      loader: `${profile.software} ${profile.version}`,
-      installed: [],
-      catalog: request.softwareId === 'paper' ? PAPER_PLUGIN_CATALOG : request.softwareId === 'fabric' ? FABRIC_MOD_CATALOG : [],
-    },
   });
   return profile;
 }
@@ -1579,13 +1464,11 @@ export function updateProfile(id: string, body: UpdateProfileRequest): Profile {
   if (body.softwareId !== undefined) {
     profile.softwareId = body.softwareId;
     profile.software = SOFTWARE_LABEL[body.softwareId];
-    entry.mods.loader = `${profile.software} ${profile.version}`;
   }
   if (body.version !== undefined) {
     profile.version = body.version;
     profile.javaMajor = javaFor(body.version);
     profile.image = imageFor(body.version);
-    entry.mods.loader = `${profile.software} ${profile.version}`;
   }
   if (body.memory !== undefined) profile.memory = body.memory;
   if (body.cpuCores !== undefined) profile.cpuCores = body.cpuCores;
@@ -1623,11 +1506,7 @@ export function duplicateProfile(id: string): Profile {
   });
   const cloned = profiles.get(copy.id)!;
   cloned.properties = entry.properties.map((field) => ({ ...field }));
-  cloned.mods = {
-    loader: entry.mods.loader,
-    installed: entry.mods.installed.map((m) => ({ ...m })),
-    catalog: entry.mods.catalog.map((c) => ({ ...c })),
-  };
+  demoContent.copyContent(id, copy.id);
   return copy;
 }
 
@@ -1679,72 +1558,67 @@ export function saveProfileProperties(id: string, changes: Record<string, string
   return getProfileProperties(id);
 }
 
-export function getProfileMods(id: string): ModIndex {
+/* --------------------------- mods and plugins -------------------------- */
+
+const profileOf = (id: string): Profile => {
   const entry = profiles.get(id);
-  if (!entry) throw new Error(`no such profile: ${id}`);
-  return entry.mods;
+  if (!entry) throw new Error(`No configuration with id \`${id}\`.`);
+  return entry.profile;
+};
+
+export const getContent = (id: string): ContentIndex => demoContent.index(profileOf(id));
+export const searchContent = (
+  id: string,
+  params: { q: string; sort?: string; offset?: number; limit?: number },
+): ContentSearchResult => demoContent.search(profileOf(id), params);
+export const getContentVersions = (id: string, provider: ContentSource, project: string): ContentVersion[] =>
+  demoContent.versions(profileOf(id), provider, project);
+export const planContent = (id: string, body: ContentPlanRequest): InstallPlan =>
+  demoContent.plan(profileOf(id), body.items);
+export const applyContent = (id: string, items: ContentRef[]): ContentIndex => demoContent.apply(profileOf(id), items);
+export const setContentEnabled = (id: string, entry: string, enabled: boolean): ContentIndex =>
+  demoContent.setEnabled(profileOf(id), entry, enabled);
+export const removeContent = (id: string, entry: string): ContentIndex => demoContent.remove(profileOf(id), entry);
+export const updateContent = (id: string, entry: string): ContentIndex => demoContent.update(profileOf(id), entry);
+export const checkContentUpdates = (id: string): ContentIndex => demoContent.checkUpdates(profileOf(id));
+export const uploadContent = (id: string, filename: string, size: number): ContentIndex =>
+  demoContent.upload(profileOf(id), filename, size);
+
+const demoJobs: Job[] = [];
+
+/** The demo can't read zips: it makes an empty Fabric configuration named after the file. */
+export function importModpack(filename: string): Job {
+  if (!filename.toLowerCase().endsWith('.mrpack')) throw new Error("That isn't a Modrinth modpack: it isn't a .mrpack file.");
+  const name = filename.replace(/\.mrpack$/i, '');
+  const profile = createProfile({
+    name,
+    description: 'Imported modpack (demo: the pack itself is not read)',
+    softwareId: 'fabric',
+    version: '1.21.4',
+    memory: { minMb: 2048, maxMb: 6144, initialMb: 2048 },
+    cpuCores: null,
+    javaArgs: settings.defaultJavaArgs,
+    autoStart: false,
+    restartOnCrash: true,
+    crashThreshold: 3,
+  });
+  const now = iso();
+  const job: Job = {
+    id: `job-demo-${demoJobs.length + 1}`,
+    kind: 'import',
+    targetId: profile.id,
+    state: 'succeeded',
+    progress: 1,
+    message: `Imported ${name} with 0 mods`,
+    error: null,
+    createdAt: now,
+    finishedAt: now,
+  };
+  demoJobs.unshift(job);
+  return job;
 }
 
-export function patchMod(id: string, modId: string, enabled: boolean): ModIndex {
-  const entry = profiles.get(id);
-  if (!entry) throw new Error(`no such profile: ${id}`);
-  entry.mods.installed = entry.mods.installed.map((mod) => (mod.id === modId ? { ...mod, enabled } : mod));
-  return entry.mods;
-}
-
-export function installMod(id: string, catalogId: string): ModIndex {
-  const entry = profiles.get(id);
-  if (!entry) throw new Error(`no such profile: ${id}`);
-  const found = entry.mods.catalog.find((item) => item.id === catalogId);
-  if (!found) throw new Error(`no such mod: ${catalogId}`);
-  if (!entry.mods.installed.some((item) => item.id === found.id)) {
-    entry.mods.installed.push({
-      id: found.id,
-      name: found.name,
-      version: found.latestVersion,
-      kind: found.kind,
-      source: found.source,
-      author: found.author,
-      description: found.description,
-      sizeBytes: found.sizeBytes,
-      downloads: found.downloads,
-      enabled: true,
-    });
-    entry.mods.catalog = entry.mods.catalog.filter((item) => item.id !== catalogId);
-  }
-  return entry.mods;
-}
-
-export function uninstallMod(id: string, modId: string): ModIndex {
-  const entry = profiles.get(id);
-  if (!entry) throw new Error(`no such profile: ${id}`);
-  const found = entry.mods.installed.find((item) => item.id === modId);
-  entry.mods.installed = entry.mods.installed.filter((item) => item.id !== modId);
-  if (found) {
-    entry.mods.catalog.unshift({
-      id: found.id,
-      name: found.name,
-      author: found.author,
-      description: found.description,
-      kind: found.kind,
-      source: found.source,
-      latestVersion: found.latestVersion ?? found.version,
-      sizeBytes: found.sizeBytes,
-      downloads: found.downloads,
-      categories: ['installed before'],
-    });
-  }
-  return entry.mods;
-}
-
-export function updateMod(id: string, modId: string): ModIndex {
-  const entry = profiles.get(id);
-  if (!entry) throw new Error(`no such profile: ${id}`);
-  entry.mods.installed = entry.mods.installed.map((mod) =>
-    mod.id === modId && mod.latestVersion ? { ...mod, version: mod.latestVersion, updateAvailable: false } : mod,
-  );
-  return entry.mods;
-}
+export const getJobs = (): Job[] => [...demoJobs];
 
 /* ------------------------------ instances ------------------------------ */
 
@@ -2354,7 +2228,6 @@ export { ADVANCEMENTS, DEATHS, AMBIENT_LINES, playerLine, int, pick };
 
 const settings: AppSettings = {
   publicAddress: '',
-  eulaAccepted: true,
   defaultJavaArgs: '-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200',
 };
 
@@ -2370,9 +2243,33 @@ export function getSettings(): AppSettings {
 
 export function updateSettings(body: UpdateSettingsRequest): AppSettings {
   if (body.publicAddress !== undefined) settings.publicAddress = body.publicAddress.trim();
-  if (body.eulaAccepted !== undefined) settings.eulaAccepted = body.eulaAccepted;
   if (body.defaultJavaArgs !== undefined) settings.defaultJavaArgs = body.defaultJavaArgs.trim();
   return getSettings();
+}
+
+const DEMO_USER: UserInfo = { id: 'user-demo', username: 'demo', displayName: 'Demo Admin', admin: true };
+let demoEula = true;
+
+export function getMe(): Me {
+  return { user: DEMO_USER, eulaAccepted: demoEula, auth: { mode: 'dev', issuer: null, clientId: null } };
+}
+
+export function updateMe(body: UpdateMeRequest): Me {
+  if (body.eulaAccepted !== undefined) demoEula = body.eulaAccepted;
+  return getMe();
+}
+
+export function getUsers(): UserSummary[] {
+  return [
+    {
+      user: DEMO_USER,
+      eulaAccepted: demoEula,
+      worlds: worlds.size,
+      profiles: profiles.size,
+      instances: instances.size,
+      lastSeenAt: iso(),
+    },
+  ];
 }
 
 export function getSystem(): SystemInfo {

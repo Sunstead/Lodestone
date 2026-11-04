@@ -8,39 +8,125 @@ use futures::{Stream, StreamExt};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::app::AppState;
+use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
-use crate::model::{AppSettings, HealthResponse, Job, ResourceKind, SystemInfo, UpdateSettingsRequest};
+use crate::model::{
+    AppSettings, HealthResponse, Job, LodestoneEvent, Me, ResourceKind, SystemInfo, UpdateMeRequest,
+    UpdateSettingsRequest, UserSummary,
+};
 
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok".into(), version: crate::VERSION.into() })
+pub async fn health(State(app): State<AppState>) -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok".into(), version: crate::VERSION.into(), auth: app.auth.info() })
 }
 
-/// One SSE stream for every change: `lodestone` events carry a `LodestoneEvent`.
-pub async fn events(State(app): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = BroadcastStream::new(app.events.subscribe()).filter_map(|event| async move {
-        // A lagging client skips events; the UI refetches on the next one.
-        let event = event.ok()?;
-        Some(Ok(Event::default().event("lodestone").json_data(event).ok()?))
+/// Whether `user` may see something about `id`: theirs, an admin, or
+/// (for ids nothing owns any more) harmless.
+async fn visible(app: &AppState, user: &CurrentUser, id: &str) -> bool {
+    if user.admin {
+        return true;
+    }
+    match app.store.owner_of_any(id).await {
+        Ok(Some(owner)) => owner.as_deref() == Some(user.id.as_str()),
+        Ok(None) => false,
+        Err(_) => false,
+    }
+}
+
+/// One SSE stream for every change: `lodestone` events carry a
+/// `LodestoneEvent`, filtered to what the caller owns. Collection-wide
+/// hints and deletions (just an id) go to everyone.
+pub async fn events(
+    State(app): State<AppState>,
+    user: CurrentUser,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = BroadcastStream::new(app.events.subscribe()).filter_map(move |event| {
+        let (app, user) = (app.clone(), user.clone());
+        async move {
+            // A lagging client skips events; the UI refetches on the next one.
+            let event = event.ok()?;
+            let subject = match &event {
+                LodestoneEvent::Changed { id, .. } => id.clone(),
+                LodestoneEvent::Deleted { .. } => None,
+                LodestoneEvent::InstanceState { id, .. } => Some(id.clone()),
+                LodestoneEvent::Job { job } => Some(job.target_id.clone()),
+            };
+            if let Some(id) = subject {
+                if !visible(&app, &user, &id).await {
+                    return None;
+                }
+            }
+            Some(Ok(Event::default().event("lodestone").json_data(event).ok()?))
+        }
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-pub async fn list_jobs(State(app): State<AppState>) -> AppResult<Json<Vec<Job>>> {
-    Ok(Json(app.store.recent_jobs(50).await?))
+pub async fn list_jobs(State(app): State<AppState>, user: CurrentUser) -> AppResult<Json<Vec<Job>>> {
+    let mut out = vec![];
+    for job in app.store.recent_jobs(100).await? {
+        if visible(&app, &user, &job.target_id).await {
+            out.push(job);
+        }
+        if out.len() == 50 {
+            break;
+        }
+    }
+    Ok(Json(out))
 }
 
-pub async fn get_job(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Job>> {
-    Ok(Json(app.store.get_job(&id).await?))
+pub async fn get_job(State(app): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> AppResult<Json<Job>> {
+    let job = app.store.get_job(&id).await?;
+    if !visible(&app, &user, &job.target_id).await {
+        return Err(AppError::not_found("job", &id));
+    }
+    Ok(Json(job))
 }
 
-pub async fn get_settings(State(app): State<AppState>) -> AppResult<Json<AppSettings>> {
+pub async fn me(State(app): State<AppState>, user: CurrentUser) -> Json<Me> {
+    Json(Me { eula_accepted: user.eula_accepted || app.config.accept_eula, user: user.info(), auth: app.auth.info() })
+}
+
+pub async fn patch_me(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Json(patch): Json<UpdateMeRequest>,
+) -> AppResult<Json<Me>> {
+    let mut user = user;
+    if let Some(accepted) = patch.eula_accepted {
+        app.store.set_eula(&user.id, accepted).await?;
+        user.eula_accepted = accepted;
+    }
+    Ok(me(State(app), user).await)
+}
+
+pub async fn list_users(State(app): State<AppState>, user: CurrentUser) -> AppResult<Json<Vec<UserSummary>>> {
+    user.require_admin()?;
+    let users = app.store.list_users().await?;
+    Ok(Json(
+        users
+            .into_iter()
+            .map(|(row, [worlds, profiles, instances])| UserSummary {
+                eula_accepted: row.eula_accepted_at.is_some(),
+                last_seen_at: row.last_seen_at.clone(),
+                user: crate::auth::CurrentUser::from(row).info(),
+                worlds,
+                profiles,
+                instances,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn get_settings(State(app): State<AppState>, _user: CurrentUser) -> AppResult<Json<AppSettings>> {
     Ok(Json(app.store.settings().await?))
 }
 
 pub async fn patch_settings(
     State(app): State<AppState>,
+    user: CurrentUser,
     Json(patch): Json<UpdateSettingsRequest>,
 ) -> AppResult<Json<AppSettings>> {
+    user.require_admin()?;
     let mut settings = app.store.settings().await?;
     if let Some(address) = patch.public_address {
         let address = address.trim().trim_start_matches("http://").trim_start_matches("https://").trim_end_matches('/');
@@ -50,9 +136,6 @@ pub async fn patch_settings(
             ));
         }
         settings.public_address = address.to_owned();
-    }
-    if let Some(accepted) = patch.eula_accepted {
-        settings.eula_accepted = accepted;
     }
     if let Some(args) = patch.default_java_args {
         settings.default_java_args = args.trim().to_owned();
@@ -64,7 +147,7 @@ pub async fn patch_settings(
     Ok(Json(settings))
 }
 
-pub async fn system_info(State(app): State<AppState>) -> AppResult<Json<SystemInfo>> {
+pub async fn system_info(State(app): State<AppState>, _user: CurrentUser) -> AppResult<Json<SystemInfo>> {
     let root = app.paths.root().to_path_buf();
     let data_dir_bytes = tokio::task::spawn_blocking(move || crate::util::dir_size(&root)).await.unwrap_or(0);
     Ok(Json(SystemInfo {

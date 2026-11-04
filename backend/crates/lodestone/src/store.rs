@@ -85,10 +85,13 @@ impl Store {
     /* ------------------------------ worlds ------------------------------ */
 
     /// Worlds with `attachedInstanceId` resolved from the instances table.
-    pub async fn list_worlds(&self) -> AppResult<Vec<World>> {
+    /// `owner` limits the list to one user's worlds; `None` lists all.
+    pub async fn list_worlds(&self, owner: Option<&str>) -> AppResult<Vec<World>> {
         let rows = sqlx::query(
-            "SELECT w.data, i.id AS instance_id FROM worlds w LEFT JOIN instances i ON i.world_id = w.id ORDER BY w.created_at",
+            "SELECT w.data, i.id AS instance_id FROM worlds w LEFT JOIN instances i ON i.world_id = w.id
+             WHERE ?1 IS NULL OR w.owner_id = ?1 ORDER BY w.created_at",
         )
+        .bind(owner)
         .fetch_all(&self.pool)
         .await?;
         rows.iter()
@@ -113,11 +116,12 @@ impl Store {
         Ok(world)
     }
 
-    pub async fn insert_world(&self, world: &World) -> AppResult<()> {
-        sqlx::query("INSERT INTO worlds (id, data, created_at) VALUES (?, ?, ?)")
+    pub async fn insert_world(&self, world: &World, owner: &str) -> AppResult<()> {
+        sqlx::query("INSERT INTO worlds (id, data, created_at, owner_id) VALUES (?, ?, ?, ?)")
             .bind(&world.id)
             .bind(serde_json::to_string(world)?)
             .bind(&world.created_at)
+            .bind(owner)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -144,10 +148,12 @@ impl Store {
 
     /* ----------------------------- profiles ----------------------------- */
 
-    pub async fn list_profiles(&self) -> AppResult<Vec<ProfileRecord>> {
+    pub async fn list_profiles(&self, owner: Option<&str>) -> AppResult<Vec<ProfileRecord>> {
         let rows = sqlx::query(
-            "SELECT p.data, (SELECT COUNT(*) FROM instances i WHERE i.profile_id = p.id) AS uses FROM profiles p ORDER BY p.created_at",
+            "SELECT p.data, (SELECT COUNT(*) FROM instances i WHERE i.profile_id = p.id) AS uses FROM profiles p
+             WHERE ?1 IS NULL OR p.owner_id = ?1 ORDER BY p.created_at",
         )
+        .bind(owner)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(profile_from_row).collect()
@@ -164,11 +170,12 @@ impl Store {
         profile_from_row(&row)
     }
 
-    pub async fn insert_profile(&self, record: &ProfileRecord) -> AppResult<()> {
-        sqlx::query("INSERT INTO profiles (id, data, created_at) VALUES (?, ?, ?)")
+    pub async fn insert_profile(&self, record: &ProfileRecord, owner: &str) -> AppResult<()> {
+        sqlx::query("INSERT INTO profiles (id, data, created_at, owner_id) VALUES (?, ?, ?, ?)")
             .bind(&record.profile.id)
             .bind(serde_json::to_string(record)?)
             .bind(&record.profile.created_at)
+            .bind(owner)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -191,8 +198,11 @@ impl Store {
 
     /* ----------------------------- instances ---------------------------- */
 
-    pub async fn list_instances(&self) -> AppResult<Vec<InstanceRecord>> {
-        let rows = sqlx::query("SELECT data FROM instances ORDER BY created_at").fetch_all(&self.pool).await?;
+    pub async fn list_instances(&self, owner: Option<&str>) -> AppResult<Vec<InstanceRecord>> {
+        let rows = sqlx::query("SELECT data FROM instances WHERE ?1 IS NULL OR owner_id = ?1 ORDER BY created_at")
+            .bind(owner)
+            .fetch_all(&self.pool)
+            .await?;
         rows.iter().map(|row| decode(row.get::<&str, _>("data"))).collect()
     }
 
@@ -229,33 +239,38 @@ impl Store {
         world: Option<&World>,
         profile: Option<&ProfileRecord>,
         instance: &InstanceRecord,
+        owner: &str,
     ) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
         if let Some(world) = world {
-            sqlx::query("INSERT INTO worlds (id, data, created_at) VALUES (?, ?, ?)")
+            sqlx::query("INSERT INTO worlds (id, data, created_at, owner_id) VALUES (?, ?, ?, ?)")
                 .bind(&world.id)
                 .bind(serde_json::to_string(world)?)
                 .bind(&world.created_at)
+                .bind(owner)
                 .execute(&mut *tx)
                 .await?;
         }
         if let Some(profile) = profile {
-            sqlx::query("INSERT INTO profiles (id, data, created_at) VALUES (?, ?, ?)")
+            sqlx::query("INSERT INTO profiles (id, data, created_at, owner_id) VALUES (?, ?, ?, ?)")
                 .bind(&profile.profile.id)
                 .bind(serde_json::to_string(profile)?)
                 .bind(&profile.profile.created_at)
+                .bind(owner)
                 .execute(&mut *tx)
                 .await?;
         }
-        let result =
-            sqlx::query("INSERT INTO instances (id, profile_id, world_id, data, created_at) VALUES (?, ?, ?, ?, ?)")
-                .bind(&instance.id)
-                .bind(&instance.profile_id)
-                .bind(&instance.world_id)
-                .bind(serde_json::to_string(instance)?)
-                .bind(&instance.created_at)
-                .execute(&mut *tx)
-                .await;
+        let result = sqlx::query(
+            "INSERT INTO instances (id, profile_id, world_id, data, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&instance.id)
+        .bind(&instance.profile_id)
+        .bind(&instance.world_id)
+        .bind(serde_json::to_string(instance)?)
+        .bind(&instance.created_at)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await;
         map_unique(result, "world_attached", "That world is already attached to another instance.")?;
         tx.commit().await?;
         Ok(())
@@ -451,7 +466,6 @@ impl Store {
             Some(row) => decode(row.get::<&str, _>("value")),
             None => Ok(AppSettings {
                 public_address: String::new(),
-                eula_accepted: false,
                 default_java_args: "-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200".into(),
             }),
         }
@@ -462,6 +476,70 @@ impl Store {
             "INSERT INTO settings (key, value) VALUES ('app', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
         .bind(serde_json::to_string(settings)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /* ------------------------------ content ----------------------------- */
+
+    pub async fn list_content(&self, profile_id: &str) -> AppResult<Vec<crate::content::ContentRecord>> {
+        let rows = sqlx::query("SELECT data FROM profile_content WHERE profile_id = ? ORDER BY created_at, id")
+            .bind(profile_id)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|row| decode(row.get::<&str, _>("data"))).collect()
+    }
+
+    /// Inserts or replaces a lockfile row (by id).
+    pub async fn put_content(&self, profile_id: &str, record: &crate::content::ContentRecord) -> AppResult<()> {
+        let result = sqlx::query(
+            "INSERT INTO profile_content (id, profile_id, provider, project_id, filename, data, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, project_id = excluded.project_id,
+                 filename = excluded.filename, data = excluded.data",
+        )
+        .bind(&record.id)
+        .bind(profile_id)
+        .bind(record.provider.as_str())
+        .bind(&record.project_id)
+        .bind(&record.filename)
+        .bind(serde_json::to_string(record)?)
+        .bind(&record.installed_at)
+        .execute(&self.pool)
+        .await;
+        map_unique(
+            result,
+            "content_exists",
+            &format!("This configuration already has {} (or a file named {}).", record.name, record.filename),
+        )?;
+        Ok(())
+    }
+
+    pub async fn delete_content(&self, profile_id: &str, id: &str) -> AppResult<()> {
+        let result = sqlx::query("DELETE FROM profile_content WHERE profile_id = ? AND id = ?")
+            .bind(profile_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::not_found("mod or plugin", id));
+        }
+        Ok(())
+    }
+
+    /// A small per-key value in the settings table.
+    pub async fn get_value(&self, key: &str) -> AppResult<Option<String>> {
+        let row = sqlx::query("SELECT value FROM settings WHERE key = ?").bind(key).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| row.get("value")))
+    }
+
+    pub async fn put_value(&self, key: &str, value: &str) -> AppResult<()> {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -518,4 +596,262 @@ fn map_fk<T>(result: Result<T, sqlx::Error>, code: &'static str, message: &str) 
 
 fn map_unique<T>(result: Result<T, sqlx::Error>, code: &'static str, message: &str) -> AppResult<T> {
     result.map_err(|err| if is_constraint(&err, "UNIQUE") { AppError::conflict(code, message) } else { err.into() })
+}
+
+/* -------------------------------- users --------------------------------- */
+
+/// Someone who signs in. Owns worlds, profiles and instances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRow {
+    pub id: String,
+    pub username: String,
+    pub display_name: String,
+    pub admin: bool,
+    pub eula_accepted_at: Option<String>,
+    pub created_at: String,
+    pub last_seen_at: String,
+}
+
+/// Which table an owned asset lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asset {
+    World,
+    Profile,
+    Instance,
+}
+
+impl Asset {
+    fn table(self) -> &'static str {
+        match self {
+            Self::World => "worlds",
+            Self::Profile => "profiles",
+            Self::Instance => "instances",
+        }
+    }
+}
+
+/// A sign-in in progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcFlow {
+    pub state: String,
+    pub pkce_verifier: String,
+    pub nonce: String,
+    pub return_to: String,
+}
+
+pub const SESSION_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+const FLOW_TTL_SECS: i64 = 10 * 60;
+
+fn unix_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn hash_token(token: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(token.as_bytes()))
+}
+
+fn user_from_row(row: &sqlx::sqlite::SqliteRow) -> UserRow {
+    UserRow {
+        id: row.get("id"),
+        username: row.get("username"),
+        display_name: row.get("display_name"),
+        admin: row.get::<i64, _>("admin") != 0,
+        eula_accepted_at: row.get("eula_accepted_at"),
+        created_at: row.get("created_at"),
+        last_seen_at: row.get("last_seen_at"),
+    }
+}
+
+impl Store {
+    /// Finds or creates the user for an identity, refreshing the name and
+    /// admin flag the provider reports. Usernames can change; the subject
+    /// can't, so it's the key.
+    pub async fn upsert_user(
+        &self,
+        issuer: &str,
+        subject: &str,
+        username: &str,
+        display_name: &str,
+        admin: bool,
+    ) -> AppResult<UserRow> {
+        let now = now_iso();
+        sqlx::query(
+            "INSERT INTO users (id, issuer, subject, username, display_name, admin, created_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(issuer, subject) DO UPDATE SET username = excluded.username,
+                 display_name = excluded.display_name, admin = excluded.admin, last_seen_at = excluded.last_seen_at",
+        )
+        .bind(crate::util::new_id("user"))
+        .bind(issuer)
+        .bind(subject)
+        .bind(username)
+        .bind(display_name)
+        .bind(admin as i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        let row = sqlx::query("SELECT * FROM users WHERE issuer = ? AND subject = ?")
+            .bind(issuer)
+            .bind(subject)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(user_from_row(&row))
+    }
+
+    pub async fn get_user(&self, id: &str) -> AppResult<UserRow> {
+        let row = sqlx::query("SELECT * FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::not_found("user", id))?;
+        Ok(user_from_row(&row))
+    }
+
+    pub async fn list_users(&self) -> AppResult<Vec<(UserRow, [u64; 3])>> {
+        let rows = sqlx::query(
+            "SELECT u.*,
+                (SELECT COUNT(*) FROM worlds w WHERE w.owner_id = u.id) AS worlds,
+                (SELECT COUNT(*) FROM profiles p WHERE p.owner_id = u.id) AS profiles,
+                (SELECT COUNT(*) FROM instances i WHERE i.owner_id = u.id) AS instances
+             FROM users u ORDER BY u.username",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let count = |name: &str| row.get::<i64, _>(name) as u64;
+                (user_from_row(row), [count("worlds"), count("profiles"), count("instances")])
+            })
+            .collect())
+    }
+
+    pub async fn set_eula(&self, user_id: &str, accepted: bool) -> AppResult<()> {
+        sqlx::query("UPDATE users SET eula_accepted_at = ? WHERE id = ?")
+            .bind(accepted.then(now_iso))
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Who owns an asset. `None` for assets made before accounts existed.
+    pub async fn owner_of(&self, asset: Asset, id: &str) -> AppResult<Option<String>> {
+        let row = sqlx::query(&format!("SELECT owner_id FROM {} WHERE id = ?", asset.table()))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(row) => Ok(row.get("owner_id")),
+            None => Err(AppError::not_found(
+                match asset {
+                    Asset::World => "world",
+                    Asset::Profile => "configuration",
+                    Asset::Instance => "server",
+                },
+                id,
+            )),
+        }
+    }
+
+    /// Gives assets nobody owns (made before sign-in existed) to `user_id`.
+    pub async fn claim_orphans(&self, user_id: &str) -> AppResult<u64> {
+        let mut claimed = 0;
+        for table in ["worlds", "profiles", "instances"] {
+            claimed += sqlx::query(&format!("UPDATE {table} SET owner_id = ? WHERE owner_id IS NULL"))
+                .bind(user_id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        }
+        Ok(claimed)
+    }
+
+    /* ------------------------------ sessions ---------------------------- */
+
+    /// Starts a session and returns its token (shown to the browser once).
+    pub async fn create_session(&self, user_id: &str) -> AppResult<String> {
+        let token = crate::util::secret(32);
+        let now = unix_now();
+        sqlx::query("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
+            .bind(hash_token(&token))
+            .bind(user_id)
+            .bind(now)
+            .bind(now + SESSION_TTL_SECS)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM sessions WHERE expires_at < ?").bind(now).execute(&self.pool).await?;
+        Ok(token)
+    }
+
+    /// The session's user, sliding its expiry forward.
+    pub async fn session_user(&self, token: &str) -> AppResult<Option<UserRow>> {
+        let now = unix_now();
+        let hash = hash_token(token);
+        let row = sqlx::query(
+            "SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
+        )
+        .bind(&hash)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        if row.is_some() {
+            sqlx::query("UPDATE sessions SET expires_at = ? WHERE token_hash = ?")
+                .bind(now + SESSION_TTL_SECS)
+                .bind(&hash)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(row.as_ref().map(user_from_row))
+    }
+
+    pub async fn delete_session(&self, token: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?").bind(hash_token(token)).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn put_flow(&self, flow: &OidcFlow) -> AppResult<()> {
+        let now = unix_now();
+        sqlx::query("DELETE FROM oidc_flows WHERE created_at < ?")
+            .bind(now - FLOW_TTL_SECS)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("INSERT INTO oidc_flows (state, data, created_at) VALUES (?, ?, ?)")
+            .bind(&flow.state)
+            .bind(serde_json::to_string(flow)?)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Takes a flow once: a callback can't be replayed.
+    pub async fn take_flow(&self, state: &str) -> AppResult<Option<OidcFlow>> {
+        let row = sqlx::query("DELETE FROM oidc_flows WHERE state = ? AND created_at >= ? RETURNING data")
+            .bind(state)
+            .bind(unix_now() - FLOW_TTL_SECS)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| decode(row.get::<&str, _>("data"))).transpose()
+    }
+}
+
+impl Store {
+    /// Who owns whatever `id` names (a world, profile, instance or backup).
+    /// `None` when nothing has that id; `Some(None)` when it has no owner.
+    pub async fn owner_of_any(&self, id: &str) -> AppResult<Option<Option<String>>> {
+        let row = sqlx::query(
+            "SELECT owner_id FROM worlds WHERE id = ?1
+             UNION ALL SELECT owner_id FROM profiles WHERE id = ?1
+             UNION ALL SELECT owner_id FROM instances WHERE id = ?1
+             UNION ALL SELECT w.owner_id FROM backups b JOIN worlds w ON w.id = b.world_id WHERE b.id = ?1
+             LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.get("owner_id")))
+    }
 }

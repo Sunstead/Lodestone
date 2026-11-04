@@ -50,6 +50,8 @@ const backendArgs = [
   '--runtime', real ? 'docker' : 'fake',
   '--providers', real ? 'real' : 'fake',
   '--accept-eula',
+  '--dev-user',
+  'dev',
   '--stop-timeout', '20',
   '--fake-speed', '0.05',
 ];

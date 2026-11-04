@@ -46,7 +46,7 @@ export function LocationHeader(
 
   if (props.variant === 'title-only') {
     return (
-      <div className='sticky top-0 z-30 flex h-12 min-w-0 items-center gap-2 border-y bg-sidebar/85 px-2 backdrop-blur-md'>
+      <div className='sticky top-0 z-30 flex h-12 min-w-0 items-center gap-2 border-b bg-sidebar/85 px-2 backdrop-blur-md'>
         <SidebarTrigger aria-label='Toggle sidebar' className='shrink-0' />
         <h1 className='min-w-0 truncate text-base font-semibold'>{props.ribbonLabel}</h1>
         {actions ? <div className='ml-auto flex shrink-0 items-center gap-2'>{actions}</div> : null}
@@ -63,9 +63,11 @@ export function LocationHeader(
   const crumbs = props.variant === 'tabs-only' ? null : props.crumbs;
 
   return (
-    <div className='sticky top-0 z-30 border-y bg-sidebar/85 backdrop-blur-md'>
+    // Every row is h-12 with its own bottom border, so the first row's border
+    // lines up with the sidebar header's (also h-12).
+    <div className={`sticky top-0 z-30 bg-sidebar/85 backdrop-blur-md ${crumbs ? '' : 'border-t'}`}>
       {crumbs ? (
-        <div className='flex h-11 min-w-0 items-center gap-2 px-2'>
+        <div className='flex h-12 min-w-0 items-center gap-2 border-b px-2'>
           <SidebarTrigger aria-label='Toggle sidebar' className='shrink-0' />
           <nav aria-label='Breadcrumb' className='flex min-w-0 items-center gap-1 text-sm'>
             {crumbs.map((crumb, index) => {
@@ -99,7 +101,7 @@ export function LocationHeader(
         </div>
       ) : null}
 
-      <div className={`flex h-12 min-w-0 items-stretch ${crumbs ? 'border-t' : ''}`}>
+      <div className='flex h-12 min-w-0 items-stretch border-b'>
         {!crumbs ? (
           <SidebarTrigger aria-label='Toggle sidebar' className='mx-2 shrink-0 self-center' />
         ) : null}

@@ -183,7 +183,7 @@ export function CreateInstanceDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className='max-h-[62vh] space-y-5 overflow-y-auto pr-1'>
+        <div className='-mx-1 max-h-[62vh] min-w-0 space-y-5 overflow-x-hidden overflow-y-auto px-1 pb-1'>
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor='instance-name'>Name</FieldLabel>

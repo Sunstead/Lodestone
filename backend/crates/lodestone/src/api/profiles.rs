@@ -3,14 +3,15 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::app::AppState;
+use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    CreateProfileRequest, ModIndex, Profile, ProfileMemory, ProfilePorts, PropertyFile, ResourceKind,
-    SavePropertiesRequest, SoftwareCatalog, UpdateProfileRequest,
+    CreateProfileRequest, Profile, ProfileMemory, ProfilePorts, PropertyFile, ResourceKind, SavePropertiesRequest,
+    SoftwareCatalog, UpdateProfileRequest,
 };
 use crate::properties;
 use crate::software;
-use crate::store::{AccessLists, ProfileRecord};
+use crate::store::{AccessLists, Asset, ProfileRecord};
 use crate::util::{new_id, now_iso};
 
 fn validate_memory(memory: &ProfileMemory) -> AppResult<()> {
@@ -66,11 +67,12 @@ pub async fn new_profile(app: &AppState, req: CreateProfileRequest) -> AppResult
     })
 }
 
-pub async fn list(State(app): State<AppState>) -> AppResult<Json<Vec<Profile>>> {
-    Ok(Json(app.store.list_profiles().await?.into_iter().map(|record| record.profile).collect()))
+pub async fn list(State(app): State<AppState>, user: CurrentUser) -> AppResult<Json<Vec<Profile>>> {
+    Ok(Json(app.store.list_profiles(Some(&user.id)).await?.into_iter().map(|record| record.profile).collect()))
 }
 
-pub async fn get(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Profile>> {
+pub async fn get(State(app): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> AppResult<Json<Profile>> {
+    user.check(&app.store, Asset::Profile, &id).await?;
     Ok(Json(app.store.get_profile(&id).await?.profile))
 }
 
@@ -80,10 +82,11 @@ pub async fn software(State(app): State<AppState>) -> AppResult<Json<SoftwareCat
 
 pub async fn create(
     State(app): State<AppState>,
+    user: CurrentUser,
     Json(req): Json<CreateProfileRequest>,
 ) -> AppResult<(StatusCode, Json<Profile>)> {
     let record = new_profile(&app, req).await?;
-    app.store.insert_profile(&record).await?;
+    app.store.insert_profile(&record, &user.id).await?;
     tokio::fs::create_dir_all(app.paths.profile(&record.profile.id)).await?;
     app.events.changed(ResourceKind::Profiles, Some(record.profile.id.clone()));
     Ok((StatusCode::CREATED, Json(record.profile)))
@@ -91,9 +94,11 @@ pub async fn create(
 
 pub async fn update(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(patch): Json<UpdateProfileRequest>,
 ) -> AppResult<Json<Profile>> {
+    user.check(&app.store, Asset::Profile, &id).await?;
     let mut record = app.store.get_profile(&id).await?;
     let p = &mut record.profile;
     if let Some(name) = patch.name {
@@ -144,7 +149,8 @@ pub async fn update(
     Ok(Json(record.profile))
 }
 
-pub async fn delete(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<StatusCode> {
+pub async fn delete(State(app): State<AppState>, user: CurrentUser, Path(id): Path<String>) -> AppResult<StatusCode> {
+    user.check(&app.store, Asset::Profile, &id).await?;
     app.store.get_profile(&id).await?;
     app.store.delete_profile(&id).await?;
     let _ = tokio::fs::remove_dir_all(app.paths.profile(&id)).await;
@@ -152,7 +158,12 @@ pub async fn delete(State(app): State<AppState>, Path(id): Path<String>) -> AppR
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn duplicate(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<(StatusCode, Json<Profile>)> {
+pub async fn duplicate(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<(StatusCode, Json<Profile>)> {
+    user.check(&app.store, Asset::Profile, &id).await?;
     let source = app.store.get_profile(&id).await?;
     let now = now_iso();
     let mut copy = source.clone();
@@ -163,7 +174,13 @@ pub async fn duplicate(State(app): State<AppState>, Path(id): Path<String>) -> A
     copy.profile.instance_count = 0;
     let (from, to) = (app.paths.profile(&id), app.paths.profile(&copy.profile.id));
     tokio::task::spawn_blocking(move || copy_tree(&from, &to)).await.map_err(anyhow::Error::from)??;
-    app.store.insert_profile(&copy).await?;
+    app.store.insert_profile(&copy, &user.id).await?;
+    // The copy gets its own lockfile rows (the files themselves are shared
+    // through the cache).
+    for mut entry in app.store.list_content(&id).await? {
+        entry.id = new_id("content");
+        app.store.put_content(&copy.profile.id, &entry).await?;
+    }
     app.events.changed(ResourceKind::Profiles, Some(copy.profile.id.clone()));
     Ok((StatusCode::CREATED, Json(copy.profile)))
 }
@@ -193,16 +210,23 @@ fn property_file(app: &AppState, record: &ProfileRecord) -> PropertyFile {
     }
 }
 
-pub async fn properties(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<PropertyFile>> {
+pub async fn properties(
+    State(app): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<PropertyFile>> {
+    user.check(&app.store, Asset::Profile, &id).await?;
     let record = app.store.get_profile(&id).await?;
     Ok(Json(property_file(&app, &record)))
 }
 
 pub async fn save_properties(
     State(app): State<AppState>,
+    user: CurrentUser,
     Path(id): Path<String>,
     Json(req): Json<SavePropertiesRequest>,
 ) -> AppResult<Json<PropertyFile>> {
+    user.check(&app.store, Asset::Profile, &id).await?;
     properties::validate_profile_changes(&req.changes)?;
     let mut record = app.store.get_profile(&id).await?;
     for (key, value) in req.changes {
@@ -218,13 +242,4 @@ pub async fn save_properties(
     app.events.changed(ResourceKind::Profiles, Some(id));
     app.events.changed(ResourceKind::Instances, None);
     Ok(Json(property_file(&app, &record)))
-}
-
-pub async fn mods(State(app): State<AppState>, Path(id): Path<String>) -> AppResult<Json<ModIndex>> {
-    let record = app.store.get_profile(&id).await?;
-    Ok(Json(ModIndex { installed: vec![], catalog: vec![], loader: record.profile.software }))
-}
-
-pub async fn mods_not_yet() -> AppError {
-    AppError::NotImplemented("Installing mods and plugins arrives with Modrinth support.".into())
 }

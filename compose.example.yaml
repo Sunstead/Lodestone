@@ -15,8 +15,10 @@
 
 services:
   lodestone:
-    build: .
-    image: lodestone:latest
+    # Pin a release in production, e.g. ghcr.io/sunstead/lodestone:0.2.0.
+    image: ghcr.io/sunstead/lodestone:latest
+    # Or build from this checkout:
+    # build: .
     restart: unless-stopped
     network_mode: host
     environment:

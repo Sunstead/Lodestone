@@ -34,8 +34,14 @@ editable display name.
 ```bash
 sudo mkdir -p /srv/lodestone && sudo chown "$USER": /srv/lodestone
 cp compose.example.yaml compose.yaml   # set the domains and groups
-docker compose up -d --build
+docker compose up -d
 ```
+
+The image is published to `ghcr.io/sunstead/lodestone` by
+`.github/workflows/image.yml`:
+- `:latest` and `:master` follow the default branch.
+- Tags like `v0.2.0` publish `:0.2.0` and `:0.2`.
+- Pin a version in production. `build: .` in the example builds it locally instead.
 
 What `compose.example.yaml` sets up, and why:
 

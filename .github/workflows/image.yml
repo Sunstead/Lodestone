@@ -1,0 +1,100 @@
+name: Image
+
+# Builds Lodestone (backend + web UI) and publishes it to GHCR.
+#   master   -> :latest, :master, :sha-<short>
+#   v1.2.3   -> :1.2.3, :1.2, :sha-<short>
+# Pull requests build and smoke-test without pushing.
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR image names must be lowercase; the owner may not be.
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/lodestone" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=lodestone
+            org.opencontainers.image.description=Lodestone: Minecraft servers as worlds, configurations and instances
+
+      # Build once into the local daemon so the image is checked before
+      # anything is published. The push below reuses the same cache.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: lodestone:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          # Without sign-in configured it must refuse to start.
+          if docker run --rm lodestone:test >refused.log 2>&1; then echo 'started without sign-in' >&2; exit 1; fi
+          grep 'needs sign-in' refused.log >/dev/null
+
+          # An issuer nothing answers at: it still starts, serves the UI,
+          # and refuses unauthenticated API calls.
+          docker run -d --name smoke -p 7878:7878 \
+            -e LODESTONE_OIDC_ISSUER=http://127.0.0.1:9/application/o/lodestone/ \
+            -e LODESTONE_PUBLIC_URL=http://localhost:7878 \
+            lodestone:test
+          for i in $(seq 30); do curl -fsS localhost:7878/api/v1/health >/dev/null && break; sleep 1; done
+          curl -fsS localhost:7878/api/v1/health | grep '"mode":"oidc"' >/dev/null
+          curl -fsS localhost:7878/ | grep 'id="app"' >/dev/null
+          curl -fsS localhost:7878/some/deep/link | grep 'id="app"' >/dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:7878/api/v1/worlds)" = 401
+          docker logs smoke 2>&1 | tee lodestone.log
+          grep 'Lodestone is listening' lodestone.log >/dev/null
+          if grep -q $'\x1b' lodestone.log; then echo 'ANSI escapes in docker logs' >&2; exit 1; fi
+          docker rm -f smoke >/dev/null
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

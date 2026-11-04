@@ -156,7 +156,10 @@ async fn run_server_with(software: &str, version: &str, nether_folder: &str, plu
     if let Some((slug, _)) = plugin {
         // A real install plan and download from Modrinth.
         let plan = app
-            .post(&format!("/profiles/{profile_id}/content/plan"), json!({ "items": [{ "provider": "modrinth", "projectId": slug }] }))
+            .post(
+                &format!("/profiles/{profile_id}/content/plan"),
+                json!({ "items": [{ "provider": "modrinth", "projectId": slug }] }),
+            )
             .await;
         let items: Vec<Value> = plan["install"]
             .as_array()
@@ -171,9 +174,11 @@ async fn run_server_with(software: &str, version: &str, nether_folder: &str, plu
     app.wait_state(&id, "running").await;
     if let Some((_, logs_as)) = plugin {
         let console = app.get(&format!("/instances/{id}/console?tail=2000")).await;
-        let enabled = console.as_array().unwrap().iter().any(|line| {
-            line["message"].as_str().is_some_and(|m| m.contains(&format!("Enabling {logs_as}")))
-        });
+        let enabled = console
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line["message"].as_str().is_some_and(|m| m.contains(&format!("Enabling {logs_as}"))));
         assert!(enabled, "{logs_as} didn't load");
     }
 

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use lodestone::config::{AuthConfig, OidcConfig};
+use lodestone::config::{AuthConfig, DnsConfig, OidcConfig};
 use lodestone::{Config, ProviderKind, RuntimeKind};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -115,6 +115,16 @@ struct Args {
     #[arg(long, env = "LODESTONE_CONTAINER_DNS", value_delimiter = ',')]
     container_dns: Vec<String>,
 
+    /// Cloudflare API token for servers' address names (SRV records), with
+    /// Zone → DNS → Edit on the public address's zone. Without it, the UI
+    /// shows each record to add by hand.
+    #[arg(long, env = "LODESTONE_CLOUDFLARE_API_TOKEN", hide_env_values = true)]
+    cloudflare_api_token: Option<String>,
+
+    /// The Cloudflare zone id (the zone's Overview page) the token edits.
+    #[arg(long, env = "LODESTONE_CLOUDFLARE_ZONE_ID")]
+    cloudflare_zone_id: Option<String>,
+
     /// Servers are reachable from the internet: online-mode stays on.
     #[arg(long, env = "LODESTONE_PUBLIC_SERVERS")]
     public_servers: bool,
@@ -176,6 +186,16 @@ async fn main() -> anyhow::Result<()> {
     if matches!(auth, AuthConfig::Oidc(_)) && public_url.is_none() {
         tracing::warn!("no --public-url: browsers can't sign in (bearer tokens still work)");
     }
+    // Compose passes unset variables as empty strings.
+    let set = |value: Option<String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    let dns = match (set(args.cloudflare_api_token), set(args.cloudflare_zone_id)) {
+        (Some(api_token), Some(zone_id)) => DnsConfig::Cloudflare { api_token, zone_id },
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("Set both LODESTONE_CLOUDFLARE_API_TOKEN and LODESTONE_CLOUDFLARE_ZONE_ID, or neither.")
+        }
+        _ if matches!(args.providers, ProvidersArg::Fake) => DnsConfig::Fake,
+        _ => DnsConfig::Manual,
+    };
     lodestone::run(Config {
         auth,
         public_url,
@@ -199,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
         docker_network: args.docker_network,
         container_dns: trimmed(args.container_dns),
         public_servers: args.public_servers,
+        dns,
     })
     .await
 }

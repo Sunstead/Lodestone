@@ -59,6 +59,7 @@ scripts/    dev.mjs, with-backend.mjs
 | `properties` | Shared schema, ownership validation, `server.properties` rendering and parsing. |
 | `backups` | `tar.zst` archives with `save-off`/`save-all flush` around them, atomic restore, scheduler. |
 | `jobs`, `events` | Long-running work with persisted progress. A broadcast bus feeds `GET /events` (SSE). |
+| `dns` | Address names: an SRV record per named server (`_minecraft._tcp.<name>.<public address>`), kept in Cloudflare by a background sync that only touches records it tagged, or shown for adding by hand. |
 | `host`, `ports`, `logparse` | Host metrics, port allocation, log/command-reply parsing. |
 
 ## How a server starts
@@ -151,7 +152,7 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 - [x] **M5** Modrinth: search, install plans with dependencies, update checks, uploads, `.mrpack` import. Mods panel rewrite.
 - [x] **M6** Accounts through Authentik (OIDC) with per-user ownership, a Docker image and compose file (`docs/deploy.md`). *Not done:* a first-run onboarding wizard (Settings covers the EULA and public address).
 - [x] **M7** Hangar (Paper plugins) and CurseForge (an API key in Settings; restricted files become manual downloads, checked against their sha1). The CurseForge client is tested against the API's documented shapes; it hasn't run against the live API, which needs a key.
-- [x] **M8** Public servers: a fixed game-port range, no public query port, an isolated Docker network and hardened containers, `online-mode` kept on.
+- [x] **M8** Public servers: a fixed game-port range, no public query port, an isolated Docker network and hardened containers, `online-mode` kept on. Address names (`survival.play.example.com`) through SRV records, kept in Cloudflare.
 - [ ] Later:
   - layout conversion
   - per-user quotas (servers, memory)

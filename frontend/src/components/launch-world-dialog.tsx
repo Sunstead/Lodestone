@@ -28,6 +28,7 @@ import {
   useSoftware,
   useWorlds,
 } from '#/api/queries';
+import { AddressNameField } from '#/components/server-address-card';
 import type {
   CreateInstanceRequest,
   CreateProfileRequest,
@@ -120,6 +121,7 @@ export function LaunchWorldDialog({
   // `null` = let the backend pick a free port.
   const [minecraftPort, setMinecraftPort] = useState<number | null>(null);
   const [rconPort, setRconPort] = useState<number | null>(null);
+  const [hostname, setHostname] = useState('');
 
   const [worldDraft, setWorldDraft] = useState<CreateWorldRequest>({
     name: '',
@@ -151,6 +153,7 @@ export function LaunchWorldDialog({
     setServerName('');
     setMinecraftPort(null);
     setRconPort(null);
+    setHostname('');
     setWorldDraft((previous) => ({ ...previous, name: '' }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -199,6 +202,7 @@ export function LaunchWorldDialog({
         newProfile,
         ...(minecraftPort !== null ? { minecraftPort } : {}),
         ...(rconPort !== null ? { rconPort } : {}),
+        ...(hostname.trim() ? { hostname: hostname.trim() } : {}),
         start: true,
       };
       const instance = await createInstance.mutateAsync(body);
@@ -382,6 +386,8 @@ export function LaunchWorldDialog({
                   onChange={(event) => setServerName(event.target.value)}
                 />
               </Field>
+
+              <AddressNameField id='launch-hostname' value={hostname} onChange={setHostname} />
 
               <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
                 <Field>

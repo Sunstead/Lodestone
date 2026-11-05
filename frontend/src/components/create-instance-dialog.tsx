@@ -27,6 +27,7 @@ import {
   useSoftware,
   useWorlds,
 } from '#/api/queries';
+import { AddressNameField } from '#/components/server-address-card';
 import type {
   CreateInstanceRequest,
   CreateProfileRequest,
@@ -92,6 +93,7 @@ export function CreateInstanceDialog({
   const [minecraftPort, setMinecraftPort] = useState<number | null>(null);
   const [rconPort, setRconPort] = useState<number | null>(null);
   const [queryPort, setQueryPort] = useState<number | null>(null);
+  const [hostname, setHostname] = useState('');
 
   // Inline world draft.
   const [worldDraft, setWorldDraft] = useState<CreateWorldRequest>({
@@ -126,6 +128,7 @@ export function CreateInstanceDialog({
     setMinecraftPort(null);
     setRconPort(null);
     setQueryPort(null);
+    setHostname('');
     setWorldDraft((previous) => ({ ...previous, name: '' }));
     setProfileDraft((previous) => ({ ...previous, name: '' }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -162,6 +165,7 @@ export function CreateInstanceDialog({
       ...(minecraftPort !== null ? { minecraftPort } : {}),
       ...(rconPort !== null ? { rconPort } : {}),
       ...(queryPort !== null ? { queryPort } : {}),
+      ...(hostname.trim() ? { hostname: hostname.trim() } : {}),
     };
 
     createInstance.mutate(body, {
@@ -445,6 +449,7 @@ export function CreateInstanceDialog({
           </AssetPicker>
 
           <FieldGroup>
+            <AddressNameField id='instance-hostname' value={hostname} onChange={setHostname} />
             <Field>
               <FieldLabel>Published ports</FieldLabel>
               <div className='grid grid-cols-1 gap-4 sm:grid-cols-3'>

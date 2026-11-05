@@ -46,6 +46,17 @@ pub enum AuthConfig {
     },
 }
 
+/// Who keeps servers' SRV records (address names) in DNS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsConfig {
+    /// Nobody: the UI shows each record for someone to add by hand.
+    Manual,
+    /// Cloudflare's API, with a token allowed to edit the zone's DNS.
+    Cloudflare { api_token: String, zone_id: String },
+    /// An in-memory stand-in. For the fake runtime and tests.
+    Fake,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: AuthConfig,
@@ -81,6 +92,7 @@ pub struct Config {
     pub container_dns: Vec<String>,
     /// Servers are reachable from the internet: `online-mode` is forced on.
     pub public_servers: bool,
+    pub dns: DnsConfig,
 }
 
 /// Parses `25565-25599` (or a single port) into a range.
@@ -116,6 +128,7 @@ impl Config {
             docker_network: None,
             container_dns: Vec::new(),
             public_servers: false,
+            dns: DnsConfig::Fake,
         }
     }
 }

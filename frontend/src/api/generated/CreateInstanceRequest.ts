@@ -7,7 +7,11 @@ import type { CreateWorldRequest } from "./CreateWorldRequest";
  * transaction. Give exactly one of `worldId`/`newWorld` and one of
  * `profileId`/`newProfile`. Ports left out are allocated by the server.
  */
-export type CreateInstanceRequest = { name: string, worldId?: string, newWorld?: CreateWorldRequest, profileId?: string, newProfile?: CreateProfileRequest, minecraftPort?: number, rconPort?: number, queryPort?: number, environment?: Record<string, string>, 
+export type CreateInstanceRequest = { name: string, worldId?: string, newWorld?: CreateWorldRequest, profileId?: string, newProfile?: CreateProfileRequest, minecraftPort?: number, rconPort?: number, queryPort?: number, 
+/**
+ * An address name, e.g. `survival` for `survival.play.example.com`.
+ */
+hostname?: string, environment?: Record<string, string>, 
 /**
  * Start the instance as soon as it exists.
  */

@@ -88,7 +88,7 @@ forwarded from the internet, set these:
 
 | Variable | Example | What it does |
 |---|---|---|
-| `LODESTONE_GAME_PORTS` | `25565-25599` | Game ports are allocated only in this range, and a port outside it is refused. Forward exactly this range. RCON ports stay outside it (on `127.0.0.1`), and the UDP query port is refused, since it would be published on every interface. |
+| `LODESTONE_GAME_PORTS` | `30000-30049` | Game ports are allocated only in this range, and a port outside it is refused. Forward exactly this range. RCON ports stay outside it (on `127.0.0.1`), and the UDP query port is refused, since it would be published on every interface. |
 | `LODESTONE_PUBLIC_SERVERS` | `true` | `online-mode` stays on for every server. Offline mode lets anyone join under any name, an operator's included. The configuration page shows it locked, with the reason. |
 | `LODESTONE_DOCKER_NETWORK` | `lodestone` | Servers and loader installers join this bridge network instead of Docker's default. Lodestone creates it when it's missing, with traffic between containers off (`enable_icc=false`). Its Linux bridge has the same name, so the name must be a valid interface name (up to 15 characters). Lodestone refuses to use an existing network that allows traffic between containers. |
 | `LODESTONE_CONTAINER_DNS` | `1.1.1.1,9.9.9.9` | DNS servers for the containers. Set it when the host's resolver is on a private address, which the rule below blocks. |
@@ -97,6 +97,29 @@ Every server and installer container also runs with no Linux capabilities
 (`cap_drop: ALL`), `no-new-privileges` and a limit of 4096 processes. Java
 needs none of the capabilities: it runs as the data dir's owner and listens
 above port 1024.
+
+### Address names
+
+A server can have an address name, e.g. `survival`: players then join at
+`survival.<public address>` (`survival.play.example.com`) with no port, while
+the server keeps an unremarkable port. It works through an SRV record, which
+Minecraft: Java Edition looks up before anything else:
+
+```
+_minecraft._tcp.survival.play.example.com.  SRV  0 5 30001 play.example.com.
+```
+
+The public address in Settings must be a domain name with an A record (it's
+the record's target). Names are one DNS label and unique across the host.
+
+| Variable | |
+|---|---|
+| `LODESTONE_CLOUDFLARE_API_TOKEN` | A Cloudflare API token with **Zone → DNS → Edit** on the public address's zone. Lodestone then creates, moves and removes the records itself, and the server page says when one is live. |
+| `LODESTONE_CLOUDFLARE_ZONE_ID` | That zone's id (its Overview page). |
+
+Lodestone only lists, changes or deletes SRV records whose comment starts
+with `lodestone:`, and it re-checks them every ten minutes. Without a token,
+each server's page shows the record to add at your DNS provider.
 
 ### Keep servers off the LAN
 
@@ -174,10 +197,11 @@ unless every server is Paper, and ban by name.
 | `LODESTONE_OIDC_ALLOWED_GROUPS` | — | Comma-separated; empty lets in anyone Authentik does. |
 | `LODESTONE_OIDC_DISCOVERY_URL` | issuer + `.well-known/...` | When Lodestone must reach Authentik at another address. |
 | `LODESTONE_HOST_DATA_DIR` | — | The data dir's host path, when it differs. |
-| `LODESTONE_GAME_PORTS` | — | e.g. `25565-25599`. Game ports only in this range; no query port ([§4](#4-servers-on-the-internet)). |
+| `LODESTONE_GAME_PORTS` | — | e.g. `30000-30049`. Game ports only in this range; no query port ([§4](#4-servers-on-the-internet)). |
 | `LODESTONE_PUBLIC_SERVERS` | `false` | Keep `online-mode` on. |
 | `LODESTONE_DOCKER_NETWORK` | — | An isolated bridge network for servers, created when missing. |
 | `LODESTONE_CONTAINER_DNS` | — | Comma-separated DNS servers for server containers. |
+| `LODESTONE_CLOUDFLARE_API_TOKEN`, `LODESTONE_CLOUDFLARE_ZONE_ID` | — | Keep servers' address names (SRV records) in Cloudflare ([Address names](#address-names)). |
 | `LODESTONE_CURSEFORGE_API_KEY` | — | Enables CurseForge as a source. Admins can also set it in Settings. Modrinth and Hangar need no key. |
 | `LODESTONE_DEV_USER` | — | No sign-in; everyone is this admin. Development only. |
 

@@ -7,6 +7,7 @@ pub mod backups;
 pub mod cache;
 pub mod config;
 pub mod content;
+pub mod dns;
 pub mod error;
 pub mod events;
 pub mod host;

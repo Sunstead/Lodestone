@@ -603,6 +603,71 @@ async fn public_servers_keep_online_mode_on() {
 }
 
 #[tokio::test]
+async fn address_names_become_srv_records() {
+    let app = TestApp::new().await;
+    // Without a domain to hang it off, a name can't work yet.
+    let instance = app.create_instance(json!({ "hostname": " Survival " })).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    assert_eq!(instance["hostname"], "survival");
+    assert_eq!(instance["dns"]["status"], "unavailable");
+    let port = instance["ports"]["minecraft"].as_u64().unwrap();
+    let direct = |host: &str, port: u64| if port == 25565 { host.to_owned() } else { format!("{host}:{port}") };
+    assert_eq!(instance["address"], direct("localhost", port));
+
+    let (status, _) = app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let path = format!("/instances/{id}");
+    let synced = app.wait_until("the SRV record", |i| i["dns"]["status"] == "synced", &path).await;
+    assert_eq!(synced["address"], "survival.play.example.com");
+    assert_eq!(synced["directAddress"], direct("play.example.com", port));
+    assert_eq!(synced["dns"]["record"], "_minecraft._tcp.survival.play.example.com");
+    assert_eq!(synced["dns"]["value"], format!("0 5 {port} play.example.com"));
+
+    // Names are host-wide and one DNS label.
+    let (status, _) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "rconPort": free_port(), "hostname": "survival" }))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let other = app.create_instance(json!({ "name": "other" })).await;
+    let other_path = format!("/instances/{}", other["id"].as_str().unwrap());
+    assert!(other["dns"].is_null());
+    let (status, err) = app.call(Method::PATCH, &other_path, Some(json!({ "hostname": "survival" }))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err["error"]["code"], "hostname_taken");
+    let (status, _) = app.call(Method::PATCH, &other_path, Some(json!({ "hostname": "sky.block" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A new port moves the record; removing the name removes it.
+    let (status, _) = app.call(Method::PATCH, &path, Some(json!({ "minecraftPort": port + 7 }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let moved = app
+        .wait_until(
+            "the moved record",
+            |i| i["dns"]["status"] == "synced" && i["dns"]["value"].as_str().unwrap().contains(&(port + 7).to_string()),
+            &path,
+        )
+        .await;
+    assert_eq!(moved["address"], "survival.play.example.com");
+    let (status, cleared) = app.call(Method::PATCH, &path, Some(json!({ "hostname": null }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cleared["hostname"].is_null() && cleared["dns"].is_null());
+    assert_eq!(cleared["address"], format!("play.example.com:{}", port + 7));
+    // The freed name can be taken.
+    let (status, _) = app.call(Method::PATCH, &other_path, Some(json!({ "hostname": "survival" }))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn address_names_without_a_dns_provider_are_manual() {
+    let app = TestApp::with(|config| config.dns = lodestone::config::DnsConfig::Manual).await;
+    app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;
+    let instance = app.create_instance(json!({ "hostname": "creative" })).await;
+    assert_eq!(instance["dns"]["status"], "manual");
+    assert_eq!(instance["address"], "creative.play.example.com");
+    assert!(instance["dns"]["message"].as_str().unwrap().contains("SRV record"));
+}
+
+#[tokio::test]
 async fn settings_and_system() {
     let app = TestApp::new().await;
     let (status, settings) =

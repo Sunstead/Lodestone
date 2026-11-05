@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "lodestone"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "lodestone-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1561,7 +1561,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mc-rcon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "thiserror",
  "tokio",

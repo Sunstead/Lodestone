@@ -658,6 +658,36 @@ async fn address_names_become_srv_records() {
 }
 
 #[tokio::test]
+async fn dns_syncs_that_change_nothing_stay_quiet() {
+    let app = TestApp::new().await;
+    // Let the sync at startup finish, then ask for one with nothing to do.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut events = app.state.events.subscribe();
+    app.state.dns.changed();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(events.try_recv().is_err(), "an idle DNS sync announced a change");
+
+    // A sync that creates a record does announce it, so the UI shows it live.
+    // (Creating the instance announces it by id; only the sync sends no id.)
+    app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut events = app.state.events.subscribe();
+    app.create_instance(json!({ "hostname": "quiet" })).await;
+    let mut announced = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        while let Ok(event) = events.try_recv() {
+            let event = serde_json::to_value(event).unwrap();
+            announced |= event["resource"] == "instances" && event["id"].is_null();
+        }
+        if announced {
+            break;
+        }
+    }
+    assert!(announced, "the sync that created a record stayed silent");
+}
+
+#[tokio::test]
 async fn address_names_without_a_dns_provider_are_manual() {
     let app = TestApp::with(|config| config.dns = lodestone::config::DnsConfig::Manual).await;
     app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;

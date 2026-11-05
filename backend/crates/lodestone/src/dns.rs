@@ -106,7 +106,7 @@ pub trait DnsProvider: Send + Sync {
     async fn delete(&self, id: &str) -> anyhow::Result<()>;
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SyncState {
     /// Records known to be in place after the last sync.
     present: HashSet<SrvRecord>,
@@ -172,6 +172,10 @@ impl Dns {
         Some(InstanceDns { host, record: srv.name.clone(), value: srv.value(), status, message })
     }
 
+    fn snapshot(&self) -> SyncState {
+        self.state.lock().unwrap().clone()
+    }
+
     /// Brings the provider in line with what the instances want. Returns how
     /// many records it created and deleted.
     pub async fn sync(&self, wanted: HashSet<SrvRecord>) -> anyhow::Result<(usize, usize)> {
@@ -225,6 +229,7 @@ pub fn spawn(app: Weak<Services>) {
             if services.dns.provider.is_none() {
                 return;
             }
+            let before = services.dns.snapshot();
             let outcome = match wanted(&services).await {
                 Ok(wanted) => services.dns.sync(wanted).await.map_err(|err| err.to_string()),
                 Err(err) => Err(err.to_string()),
@@ -241,7 +246,11 @@ pub fn spawn(app: Weak<Services>) {
                     RETRY
                 }
             };
-            services.events.changed(ResourceKind::Instances, None);
+            // Only when what instances show (a record's status) changed: an
+            // idle resync would otherwise make every open UI refetch.
+            if services.dns.snapshot() != before {
+                services.events.changed(ResourceKind::Instances, None);
+            }
             let wake = services.dns.wake.clone();
             drop(services);
             tokio::select! {

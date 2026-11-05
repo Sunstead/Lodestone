@@ -122,6 +122,57 @@ fn claim(port: u16, used: &mut HashSet<u16>, what: &str) -> AppResult<u16> {
     Ok(port)
 }
 
+/// Which host ports each kind may use. With a game-port range (servers
+/// forwarded from the internet), game ports stay inside it, RCON outside it,
+/// and there is no query port: it would be published on every interface and
+/// the edge doesn't forward it.
+struct PortRules(Option<std::ops::RangeInclusive<u16>>);
+
+impl PortRules {
+    fn game_range(&self) -> std::ops::RangeInclusive<u16> {
+        self.0.clone().unwrap_or(25565..=u16::MAX)
+    }
+
+    fn game(&self, port: u16) -> AppResult<u16> {
+        match &self.0 {
+            Some(range) if !range.contains(&port) => Err(AppError::bad_request(format!(
+                "Game ports on this host are {}–{}; {port} is outside them.",
+                range.start(),
+                range.end()
+            ))),
+            _ => Ok(port),
+        }
+    }
+
+    fn rcon(&self, port: u16) -> AppResult<u16> {
+        match &self.0 {
+            Some(range) if range.contains(&port) => Err(AppError::bad_request(format!(
+                "Ports {}–{} are for game connections; pick an RCON port outside them.",
+                range.start(),
+                range.end()
+            ))),
+            _ => Ok(port),
+        }
+    }
+
+    fn query(&self) -> AppResult<()> {
+        if self.0.is_some() {
+            return Err(AppError::bad_request(
+                "The query port isn't available on this host: servers here are public, and only game connections are forwarded.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A free RCON port, never inside the game range.
+    fn allocate_rcon(&self, used: &HashSet<u16>) -> Option<u16> {
+        let game = self.0.clone();
+        ports::allocate_with(25575..=u16::MAX, used, |port| {
+            !game.as_ref().is_some_and(|range| range.contains(&port)) && ports::is_free(Ipv4Addr::LOCALHOST, port)
+        })
+    }
+}
+
 /// A server is made of its owner's own world and profile, even for admins.
 async fn own(app: &AppState, user: &CurrentUser, asset: Asset, id: &str) -> AppResult<()> {
     if app.store.owner_of(asset, id).await?.as_deref() != Some(user.id.as_str()) {
@@ -174,27 +225,32 @@ pub async fn create(
     };
     supervisor::check_world_compatible(&world, &profile)?;
 
+    let rules = PortRules(app.config.game_ports.clone());
     let mut used = used_ports(&app, None).await?;
     let minecraft = match req.minecraft_port {
-        Some(port) => claim(port, &mut used, "Minecraft")?,
+        Some(port) => claim(rules.game(port)?, &mut used, "Minecraft")?,
         None => {
-            let port = ports::allocate(25565, &used, Ipv4Addr::UNSPECIFIED)
+            let port = ports::allocate(rules.game_range(), &used, Ipv4Addr::UNSPECIFIED)
                 .ok_or_else(|| AppError::conflict("no_free_port", "No free Minecraft port found."))?;
             used.insert(port);
             port
         }
     };
     let rcon = match req.rcon_port {
-        Some(port) => claim(port, &mut used, "RCON")?,
+        Some(port) => claim(rules.rcon(port)?, &mut used, "RCON")?,
         None => {
-            let port = ports::allocate(25575, &used, Ipv4Addr::LOCALHOST)
+            let port = rules
+                .allocate_rcon(&used)
                 .ok_or_else(|| AppError::conflict("no_free_port", "No free RCON port found."))?;
             used.insert(port);
             port
         }
     };
     let query = match req.query_port {
-        Some(port) => Some(claim(port, &mut used, "query")?),
+        Some(port) => {
+            rules.query()?;
+            Some(claim(port, &mut used, "query")?)
+        }
         None => None,
     };
 
@@ -248,6 +304,18 @@ pub async fn update(
             return Err(AppError::bad_request("Give the instance a name."));
         }
         record.name = name.to_owned();
+    }
+    // The range rules apply to the ports being changed, so an instance from
+    // before the range was set can still be renamed.
+    let rules = PortRules(app.config.game_ports.clone());
+    if let Some(port) = patch.minecraft_port {
+        rules.game(port)?;
+    }
+    if let Some(port) = patch.rcon_port {
+        rules.rcon(port)?;
+    }
+    if let Some(Some(_)) = patch.query_port {
+        rules.query()?;
     }
     let mut used = used_ports(&app, Some(&id)).await?;
     let minecraft = claim(patch.minecraft_port.unwrap_or(record.ports.minecraft), &mut used, "Minecraft")?;

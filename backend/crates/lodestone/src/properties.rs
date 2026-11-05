@@ -37,8 +37,14 @@ pub fn field(key: &str) -> Option<&'static PropertyField> {
     SCHEMA.iter().find(|field| field.key == key)
 }
 
+/// Kept on when servers are public (`LODESTONE_PUBLIC_SERVERS`): offline
+/// mode would let anyone join under any name, an operator's included.
+pub const ONLINE_MODE: &str = "online-mode";
+const ONLINE_MODE_REQUIRED: &str = "Always on here: these servers are reachable from the internet, so players must \
+sign in with a Minecraft account. Without it anyone could join under any name, an operator's included.";
+
 /// Profile-scoped fields with the profile's overrides applied.
-pub fn profile_fields(overrides: &StringMap) -> Vec<PropertyField> {
+pub fn profile_fields(overrides: &StringMap, public_servers: bool) -> Vec<PropertyField> {
     SCHEMA
         .iter()
         .filter(|field| field.scope == PropertyScope::Profile)
@@ -50,14 +56,24 @@ pub fn profile_fields(overrides: &StringMap) -> Vec<PropertyField> {
             } else {
                 overrides.get(&field.key).cloned().unwrap_or_else(|| field.default_value.clone())
             };
+            if public_servers && field.key == ONLINE_MODE {
+                out.value = "true".into();
+                out.read_only = Some(true);
+                out.description = ONLINE_MODE_REQUIRED.into();
+            }
             out
         })
         .collect()
 }
 
 /// Checks a batch of profile property edits against the schema.
-pub fn validate_profile_changes(changes: &StringMap) -> AppResult<()> {
+pub fn validate_profile_changes(changes: &StringMap, public_servers: bool) -> AppResult<()> {
     for (key, value) in changes {
+        if public_servers && key == ONLINE_MODE && value != "true" {
+            return Err(AppError::bad_request(format!(
+                "Online mode (`{ONLINE_MODE}`) can't be turned off. {ONLINE_MODE_REQUIRED}"
+            )));
+        }
         let field =
             field(key).ok_or_else(|| AppError::bad_request(format!("`{key}` is not a known server property.")))?;
         if field.scope != PropertyScope::Profile {
@@ -138,10 +154,20 @@ pub fn world_values(world: &World) -> StringMap {
 }
 
 /// The full `server.properties` for one launch.
-pub fn render(world: &World, profile_overrides: &StringMap, rcon_password: &str, query_enabled: bool) -> String {
+pub fn render(
+    world: &World,
+    profile_overrides: &StringMap,
+    rcon_password: &str,
+    query_enabled: bool,
+    public_servers: bool,
+) -> String {
     let mut values: StringMap = SCHEMA.iter().map(|field| (field.key.clone(), field.default_value.clone())).collect();
     values.extend(profile_overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
     values.extend(world_values(world));
+    if public_servers {
+        // Whatever the profile says, including one imported with it off.
+        values.insert(ONLINE_MODE.into(), "true".into());
+    }
     // Managed by Lodestone: the console, player actions and backups need RCON,
     // and the container always listens on fixed ports that Docker maps.
     values.insert("enable-rcon".into(), "true".into());
@@ -280,23 +306,23 @@ mod tests {
     #[test]
     fn rejects_edits_on_the_wrong_owner() {
         let world_key = StringMap::from([("difficulty".into(), "hard".into())]);
-        assert!(validate_profile_changes(&world_key).unwrap_err().to_string().contains("belongs to the world"));
+        assert!(validate_profile_changes(&world_key, false).unwrap_err().to_string().contains("belongs to the world"));
         let managed = StringMap::from([("rcon.port".into(), "1".into())]);
-        assert!(validate_profile_changes(&managed).unwrap_err().to_string().contains("managed by Lodestone"));
+        assert!(validate_profile_changes(&managed, false).unwrap_err().to_string().contains("managed by Lodestone"));
     }
 
     #[test]
     fn validates_values() {
-        assert!(validate_profile_changes(&StringMap::from([("max-players".into(), "50".into())])).is_ok());
-        assert!(validate_profile_changes(&StringMap::from([("max-players".into(), "lots".into())])).is_err());
-        assert!(validate_profile_changes(&StringMap::from([("online-mode".into(), "yes".into())])).is_err());
-        assert!(validate_profile_changes(&StringMap::from([("nonsense".into(), "1".into())])).is_err());
+        assert!(validate_profile_changes(&StringMap::from([("max-players".into(), "50".into())]), false).is_ok());
+        assert!(validate_profile_changes(&StringMap::from([("max-players".into(), "lots".into())]), false).is_err());
+        assert!(validate_profile_changes(&StringMap::from([("online-mode".into(), "yes".into())]), false).is_err());
+        assert!(validate_profile_changes(&StringMap::from([("nonsense".into(), "1".into())]), false).is_err());
     }
 
     #[test]
     fn render_merges_owners_and_forces_managed_keys() {
         let overrides = StringMap::from([("motd".into(), "Héllo = world".into()), ("rcon.port".into(), "1".into())]);
-        let text = render(&sample_world(), &overrides, "s3cret", false);
+        let text = render(&sample_world(), &overrides, "s3cret", false, false);
         let parsed = parse(&text);
         assert_eq!(parsed["motd"], "Héllo = world");
         assert_eq!(parsed["level-name"], "test");
@@ -319,8 +345,29 @@ mod tests {
     #[test]
     fn profile_fields_hide_secrets() {
         let overrides = StringMap::from([("rcon.password".into(), "nope".into())]);
-        let fields = profile_fields(&overrides);
+        let fields = profile_fields(&overrides, false);
         assert!(fields.iter().all(|field| field.scope == PropertyScope::Profile));
         assert_eq!(fields.iter().find(|f| f.key == "rcon.password").unwrap().value, "");
+    }
+
+    #[test]
+    fn public_servers_keep_online_mode_on() {
+        let off = StringMap::from([("online-mode".into(), "false".into())]);
+        assert!(validate_profile_changes(&off, false).is_ok());
+        let err = validate_profile_changes(&off, true).unwrap_err().to_string();
+        assert!(err.contains("can't be turned off"), "{err}");
+        let on = StringMap::from([("online-mode".into(), "true".into())]);
+        assert!(validate_profile_changes(&on, true).is_ok());
+
+        // A profile that already had it off (or was imported that way).
+        assert_eq!(parse(&render(&sample_world(), &off, "s", false, false))["online-mode"], "false");
+        assert_eq!(parse(&render(&sample_world(), &off, "s", false, true))["online-mode"], "true");
+
+        let field = profile_fields(&off, true).into_iter().find(|f| f.key == "online-mode").unwrap();
+        assert_eq!(field.value, "true");
+        assert_eq!(field.read_only, Some(true));
+        assert!(field.description.contains("reachable from the internet"));
+        let field = profile_fields(&off, false).into_iter().find(|f| f.key == "online-mode").unwrap();
+        assert_eq!((field.value.as_str(), field.read_only), ("false", None));
     }
 }

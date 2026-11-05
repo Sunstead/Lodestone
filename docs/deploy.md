@@ -80,6 +80,86 @@ lodestone.example.com {
 4. Players connect to the game port shown on each server. Game ports are
    published on every interface; open them in your firewall.
 
+## 4. Servers on the internet
+
+Servers run mods and plugins that anyone with an account can upload, which
+is arbitrary code. On a LAN that's a small risk. Before game ports are
+forwarded from the internet, set these:
+
+| Variable | Example | What it does |
+|---|---|---|
+| `LODESTONE_GAME_PORTS` | `25565-25599` | Game ports are allocated only in this range, and a port outside it is refused. Forward exactly this range. RCON ports stay outside it (on `127.0.0.1`), and the UDP query port is refused, since it would be published on every interface. |
+| `LODESTONE_PUBLIC_SERVERS` | `true` | `online-mode` stays on for every server. Offline mode lets anyone join under any name, an operator's included. The configuration page shows it locked, with the reason. |
+| `LODESTONE_DOCKER_NETWORK` | `lodestone` | Servers and loader installers join this bridge network instead of Docker's default. Lodestone creates it when it's missing, with traffic between containers off (`enable_icc=false`). Its Linux bridge has the same name, so the name must be a valid interface name (up to 15 characters). Lodestone refuses to use an existing network that allows traffic between containers. |
+| `LODESTONE_CONTAINER_DNS` | `1.1.1.1,9.9.9.9` | DNS servers for the containers. Set it when the host's resolver is on a private address, which the rule below blocks. |
+
+Every server and installer container also runs with no Linux capabilities
+(`cap_drop: ALL`), `no-new-privileges` and a limit of 4096 processes. Java
+needs none of the capabilities: it runs as the data dir's owner and listens
+above port 1024.
+
+### Keep servers off the LAN
+
+Docker lets containers reach anything the host can route to, including the
+LAN, the tailnet and other containers' published ports. Servers need the
+internet (Mojang's session servers, mod and library downloads) and nothing
+else. This nftables table drops the rest. It matches the network's bridge
+by name, so it's independent of the subnet Docker picks, and it lives in its
+own table, so Docker's rules are untouched:
+
+```
+#!/usr/sbin/nft -f
+# Game servers (the "lodestone" bridge) reach the internet, not the LAN,
+# the tailnet, other containers or this host.
+table inet lodestone
+delete table inet lodestone
+
+table inet lodestone {
+    set private4 {
+        type ipv4_addr
+        flags interval
+        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+                     100.64.0.0/10, 169.254.0.0/16 }
+    }
+
+    # Through the host: anything private is dropped. Replies to connections
+    # made to a server (players, Lodestone's RCON) are let through first.
+    chain forward {
+        type filter hook forward priority filter - 10; policy accept;
+        iifname "lodestone" ct state established,related accept
+        iifname "lodestone" ip daddr @private4 drop
+        iifname "lodestone" meta nfproto ipv6 drop
+    }
+
+    # To the host itself (its services on the host network, the bridge
+    # gateway): nothing a server starts.
+    chain input {
+        type filter hook input priority filter - 10; policy accept;
+        iifname "lodestone" ct state established,related accept
+        iifname "lodestone" drop
+    }
+}
+```
+
+Load it with `sudo nft -f lodestone.nft` and at boot (for example from
+`/etc/nftables.conf` with `include`, if that file doesn't `flush ruleset`
+over Docker's rules). With it in place, check from a running server:
+
+```bash
+c=$(docker ps -q --filter label=lodestone.instance | head -1)
+docker exec "$c" bash -c 'timeout 5 bash -c "</dev/tcp/1.1.1.1/443" && echo internet ok'
+docker exec "$c" bash -c 'timeout 5 bash -c "</dev/tcp/192.168.1.1/80" || echo LAN blocked'
+```
+
+### Real client addresses
+
+If the game ports are forwarded through a TCP proxy, servers see the proxy's
+address, so a ban by IP bans the proxy. Paper can read the client's address
+from the PROXY protocol (`proxies.proxy-protocol: true` in
+`config/paper-global.yml`), but vanilla, Fabric and Forge can't, and a
+server that isn't expecting it refuses every connection. Leave it off
+unless every server is Paper, and ban by name.
+
 ## Configuration reference
 
 | Variable | Default | |
@@ -94,6 +174,10 @@ lodestone.example.com {
 | `LODESTONE_OIDC_ALLOWED_GROUPS` | — | Comma-separated; empty lets in anyone Authentik does. |
 | `LODESTONE_OIDC_DISCOVERY_URL` | issuer + `.well-known/...` | When Lodestone must reach Authentik at another address. |
 | `LODESTONE_HOST_DATA_DIR` | — | The data dir's host path, when it differs. |
+| `LODESTONE_GAME_PORTS` | — | e.g. `25565-25599`. Game ports only in this range; no query port ([§4](#4-servers-on-the-internet)). |
+| `LODESTONE_PUBLIC_SERVERS` | `false` | Keep `online-mode` on. |
+| `LODESTONE_DOCKER_NETWORK` | — | An isolated bridge network for servers, created when missing. |
+| `LODESTONE_CONTAINER_DNS` | — | Comma-separated DNS servers for server containers. |
 | `LODESTONE_CURSEFORGE_API_KEY` | — | Enables CurseForge as a source. Admins can also set it in Settings. Modrinth and Hangar need no key. |
 | `LODESTONE_DEV_USER` | — | No sign-in; everyone is this admin. Development only. |
 

@@ -20,7 +20,7 @@ use crate::host::HostSampler;
 use crate::jobs::Jobs;
 use crate::model::ContentSource;
 use crate::paths::Paths;
-use crate::runtime::docker::DockerRuntime;
+use crate::runtime::docker::{DockerOptions, DockerRuntime};
 use crate::runtime::fake::FakeRuntime;
 use crate::runtime::Runtime;
 use crate::software::fake::FakeSoftware;
@@ -111,7 +111,11 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     }
     let runtime: Arc<dyn Runtime> = match config.runtime {
         RuntimeKind::Fake => Arc::new(FakeRuntime::new(config.fake_speed, config.fake_speed > 0.0)),
-        RuntimeKind::Docker => Arc::new(DockerRuntime::connect(&config.data_dir, config.host_data_dir.clone())),
+        RuntimeKind::Docker => Arc::new(DockerRuntime::connect(
+            &config.data_dir,
+            config.host_data_dir.clone(),
+            DockerOptions { network: config.docker_network.clone(), dns: config.container_dns.clone() },
+        )),
     };
 
     Ok(Arc::new(Services {

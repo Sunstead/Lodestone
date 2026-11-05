@@ -222,7 +222,10 @@ function FieldRow({
   );
 }
 
-/** A key that belongs to the world or the container: visible, never editable here. */
+/**
+ * A key this page can't edit: one owned by the world or the container, or one
+ * Lodestone manages (its description says why).
+ */
 function DerivedRow({ field }: { field: PropertyField }) {
   return (
     <div className='flex flex-col gap-2 px-4 py-3.5 sm:flex-row sm:items-center'>
@@ -231,7 +234,7 @@ function DerivedRow({ field }: { field: PropertyField }) {
           <span className='font-medium'>{field.label}</span>
           <Badge variant='outline' className='gap-1'>
             <Lock className='size-3' />
-            {field.scope}
+            {field.scope === 'profile' ? 'locked' : field.scope}
           </Badge>
         </div>
         <p className='mt-1 text-xs leading-relaxed text-muted-foreground'>
@@ -437,15 +440,19 @@ export function PropertiesPage({ profileId }: { profileId: string }) {
               {visible.length === 0 ? (
                 <p className='p-6 text-sm text-muted-foreground'>No properties match that search.</p>
               ) : (
-                visible.map((field) => (
-                  <FieldRow
-                    key={field.key}
-                    field={field}
-                    value={valueOf(field)}
-                    dirty={changes[field.key] !== undefined}
-                    onChange={(value) => setDraft((previous) => ({ ...previous, [field.key]: value }))}
-                  />
-                ))
+                visible.map((field) =>
+                  field.readOnly ? (
+                    <DerivedRow key={field.key} field={field} />
+                  ) : (
+                    <FieldRow
+                      key={field.key}
+                      field={field}
+                      value={valueOf(field)}
+                      dirty={changes[field.key] !== undefined}
+                      onChange={(value) => setDraft((previous) => ({ ...previous, [field.key]: value }))}
+                    />
+                  ),
+                )
               )}
             </CardContent>
           </Card>

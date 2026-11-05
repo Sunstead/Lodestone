@@ -507,6 +507,102 @@ async fn profile_properties_respect_ownership() {
 }
 
 #[tokio::test]
+async fn game_port_range_keeps_ports_in_their_place() {
+    let app = TestApp::with(|config| config.game_ports = Some(25590..=25599)).await;
+    let in_range = |port: &Value| (25590..=25599).contains(&port.as_u64().unwrap());
+
+    // Allocated: the game port inside the range, RCON outside it.
+    let (status, instance) = app
+        .post(
+            "/instances",
+            json!({ "name": "auto", "newWorld": world_spec("Auto"), "newProfile": profile_spec("paper", "1.21.4") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{instance}");
+    assert!(in_range(&instance["ports"]["minecraft"]), "{instance}");
+    assert!(!in_range(&instance["ports"]["rcon"]), "{instance}");
+    assert!(instance["ports"]["query"].is_null());
+    let id = instance["id"].as_str().unwrap().to_owned();
+
+    // Explicit ports: the game port must be inside, RCON outside, no query.
+    let (status, err) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "minecraftPort": 25600 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("25590–25599"), "{err}");
+    let (status, err) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "rconPort": 25595 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("RCON"), "{err}");
+    let (status, err) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "queryPort": 25596 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("query"), "{err}");
+    let ok = app.create_instance(json!({ "name": "explicit", "minecraftPort": 25598 })).await;
+    assert_eq!(ok["ports"]["minecraft"], 25598);
+
+    // The same rules for changes; other edits still work.
+    let path = format!("/instances/{id}");
+    let (status, _) = app.call(Method::PATCH, &path, Some(json!({ "minecraftPort": 30000 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = app.call(Method::PATCH, &path, Some(json!({ "queryPort": 25597 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, renamed) = app.call(Method::PATCH, &path, Some(json!({ "name": "renamed" }))).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+
+    // The range runs out rather than spilling over.
+    let mut seen = 2;
+    loop {
+        let (status, body) = app
+            .post("/instances", json!({ "name": "more", "newWorld": world_spec("More"), "newProfile": profile_spec("paper", "1.21.4") }))
+            .await;
+        if status == StatusCode::CONFLICT {
+            assert_eq!(body["error"]["code"], "no_free_port");
+            break;
+        }
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(in_range(&body["ports"]["minecraft"]), "{body}");
+        seen += 1;
+        assert!(seen <= 10, "more instances than ports in the range");
+    }
+
+    // Started: no query in server.properties.
+    let (status, _) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    assert_eq!(status, StatusCode::OK);
+    app.wait_state(&id, "running").await;
+    let props = std::fs::read_to_string(app.state.paths.instance(&id).join("server.properties")).unwrap();
+    assert!(props.contains("enable-query=false"), "{props}");
+}
+
+#[tokio::test]
+async fn public_servers_keep_online_mode_on() {
+    let app = TestApp::with(|config| config.public_servers = true).await;
+    let instance = app.create_instance(json!({})).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    let path = format!("/profiles/{}/properties", instance["profileId"].as_str().unwrap());
+
+    let file = app.get(&path).await;
+    let online = file["fields"].as_array().unwrap().iter().find(|field| field["key"] == "online-mode").unwrap();
+    assert_eq!(online["value"], "true");
+    assert_eq!(online["readOnly"], true);
+    assert!(online["description"].as_str().unwrap().contains("reachable from the internet"));
+
+    let (status, err) = app.call(Method::PUT, &path, Some(json!({ "changes": { "online-mode": "false" } }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("can't be turned off"), "{err}");
+    let (status, _) = app.call(Method::PUT, &path, Some(json!({ "changes": { "motd": "Public" } }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    assert_eq!(status, StatusCode::OK);
+    app.wait_state(&id, "running").await;
+    let props = std::fs::read_to_string(app.state.paths.instance(&id).join("server.properties")).unwrap();
+    assert!(props.contains("online-mode=true"), "{props}");
+}
+
+#[tokio::test]
 async fn settings_and_system() {
     let app = TestApp::new().await;
     let (status, settings) =

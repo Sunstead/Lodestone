@@ -98,12 +98,37 @@ struct Args {
     #[arg(long, env = "LODESTONE_CURSEFORGE_API_KEY", hide_env_values = true)]
     curseforge_api_key: Option<String>,
 
+    /// Game ports servers may use, e.g. 25565-25599. Set it when the game ports
+    /// are forwarded from the internet: RCON stays outside the range and the
+    /// query port is off. Unset: any free port from 25565 up.
+    #[arg(long, env = "LODESTONE_GAME_PORTS", value_parser = lodestone::config::parse_port_range)]
+    game_ports: Option<std::ops::RangeInclusive<u16>>,
+
+    /// A Docker network for the servers (and loader installers), created when
+    /// missing with traffic between containers off. Its bridge has the same
+    /// name, for the host firewall rule in docs/deploy.md.
+    #[arg(long, env = "LODESTONE_DOCKER_NETWORK", value_parser = network_name)]
+    docker_network: Option<String>,
+
+    /// Comma-separated DNS servers for server containers, e.g. 1.1.1.1,9.9.9.9.
+    /// Needed when the host resolver is on an address the firewall blocks.
+    #[arg(long, env = "LODESTONE_CONTAINER_DNS", value_delimiter = ',')]
+    container_dns: Vec<String>,
+
+    /// Servers are reachable from the internet: online-mode stays on.
+    #[arg(long, env = "LODESTONE_PUBLIC_SERVERS")]
+    public_servers: bool,
+
     /// No sign-in: every request is this user, an admin. Development only.
     #[arg(long, env = "LODESTONE_DEV_USER", conflicts_with = "oidc_issuer")]
     dev_user: Option<String>,
 }
 
-fn groups(list: Vec<String>) -> Vec<String> {
+fn network_name(raw: &str) -> Result<String, String> {
+    lodestone::runtime::docker::check_network_name(raw).map(|()| raw.to_owned())
+}
+
+fn trimmed(list: Vec<String>) -> Vec<String> {
     list.into_iter().map(|g| g.trim().to_owned()).filter(|g| !g.is_empty()).collect()
 }
 
@@ -126,8 +151,8 @@ async fn main() -> anyhow::Result<()> {
                 issuer,
                 client_id: args.oidc_client_id,
                 scopes: args.oidc_scopes,
-                allowed_groups: groups(args.oidc_allowed_groups),
-                admin_groups: groups(args.oidc_admin_groups),
+                allowed_groups: trimmed(args.oidc_allowed_groups),
+                admin_groups: trimmed(args.oidc_admin_groups),
                 discovery_url: args.oidc_discovery_url,
             })
         }
@@ -170,6 +195,10 @@ async fn main() -> anyhow::Result<()> {
         stop_timeout: Duration::from_secs(args.stop_timeout),
         fake_speed: args.fake_speed,
         host_data_dir: args.host_data_dir,
+        game_ports: args.game_ports,
+        docker_network: args.docker_network,
+        container_dns: trimmed(args.container_dns),
+        public_servers: args.public_servers,
     })
     .await
 }

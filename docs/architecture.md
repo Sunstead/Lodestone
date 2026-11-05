@@ -85,6 +85,8 @@ start ─▶ preparing ─▶ starting ─"Done ("─▶ running ─stop─▶ s
    | the profile's `plugins/` or `mods/`+`config/`, and any other folder a modpack brought | `/server/<name>` | read-write |
 
    The command is `java -Xms -Xmx … -jar server.jar --universe worlds --nogui`. Vanilla, Paper, Fabric and Forge all honour `--universe`, so one mount works for both world layouts. The game port is published on every interface. RCON is published on `127.0.0.1` only, with a per-instance random password.
+
+   Containers run with no capabilities, `no-new-privileges` and a process limit. With `LODESTONE_DOCKER_NETWORK` they join a bridge network with traffic between containers off, which a host firewall rule keeps off the LAN. With `LODESTONE_GAME_PORTS`, game ports come from that range only and there's no query port; with `LODESTONE_PUBLIC_SERVERS`, `online-mode` is forced on (`docs/deploy.md` §4).
 3. **Supervise:**
    - Parse log lines: `Done (` means running; joins and leaves track players and playtime per world.
    - Sample container stats.
@@ -149,6 +151,7 @@ In live mode, `useEventStream()` subscribes to `GET /events` and invalidates the
 - [x] **M5** Modrinth: search, install plans with dependencies, update checks, uploads, `.mrpack` import. Mods panel rewrite.
 - [x] **M6** Accounts through Authentik (OIDC) with per-user ownership, a Docker image and compose file (`docs/deploy.md`). *Not done:* a first-run onboarding wizard (Settings covers the EULA and public address).
 - [x] **M7** Hangar (Paper plugins) and CurseForge (an API key in Settings; restricted files become manual downloads, checked against their sha1). The CurseForge client is tested against the API's documented shapes; it hasn't run against the live API, which needs a key.
+- [x] **M8** Public servers: a fixed game-port range, no public query port, an isolated Docker network and hardened containers, `online-mode` kept on.
 - [ ] Later:
   - layout conversion
   - per-user quotas (servers, memory)

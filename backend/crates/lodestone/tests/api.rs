@@ -261,6 +261,25 @@ async fn starting_requires_the_eula() {
 }
 
 #[tokio::test]
+async fn a_running_server_has_a_generated_world() {
+    let app = TestApp::new().await;
+    let instance = app.create_instance(json!({})).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    let world = format!("/worlds/{}", instance["worldId"].as_str().unwrap());
+    let mut events = app.state.events.subscribe();
+    app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    // Read the world the moment the server is announced as running.
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+        let event = serde_json::to_value(event).unwrap();
+        if event["type"] == "instanceState" && event["id"] == id.as_str() && event["state"] == "running" {
+            break;
+        }
+    }
+    assert_eq!(app.get(&world).await["generated"], true);
+}
+
+#[tokio::test]
 async fn lifecycle_console_and_players() {
     let app = TestApp::new().await;
     let instance = app.create_instance(json!({ "start": true })).await;

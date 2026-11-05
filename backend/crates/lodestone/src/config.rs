@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -45,6 +46,17 @@ pub enum AuthConfig {
     },
 }
 
+/// Who keeps servers' SRV records (address names) in DNS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsConfig {
+    /// Nobody: the UI shows each record for someone to add by hand.
+    Manual,
+    /// Cloudflare's API, with a token allowed to edit the zone's DNS.
+    Cloudflare { api_token: String, zone_id: String },
+    /// An in-memory stand-in. For the fake runtime and tests.
+    Fake,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub auth: AuthConfig,
@@ -68,6 +80,32 @@ pub struct Config {
     /// When set, data paths handed to Docker are rewritten from `data_dir`
     /// to this host path (Lodestone itself running in a container).
     pub host_data_dir: Option<PathBuf>,
+    /// When set, game ports are allocated only in this range and explicit
+    /// ones outside it are refused. RCON stays outside it, and the query port
+    /// is off. For hosts whose game ports are forwarded from the internet.
+    pub game_ports: Option<RangeInclusive<u16>>,
+    /// Docker network the servers join. Lodestone creates it when missing,
+    /// with traffic between containers off; see `docs/deploy.md` for the
+    /// host firewall rule that keeps servers away from the LAN.
+    pub docker_network: Option<String>,
+    /// DNS servers for server containers (Docker's default when empty).
+    pub container_dns: Vec<String>,
+    /// Servers are reachable from the internet: `online-mode` is forced on.
+    pub public_servers: bool,
+    pub dns: DnsConfig,
+}
+
+/// Parses `25565-25599` (or a single port) into a range.
+pub fn parse_port_range(raw: &str) -> Result<RangeInclusive<u16>, String> {
+    let raw = raw.trim();
+    let (start, end) = raw.split_once('-').unwrap_or((raw, raw));
+    let parse =
+        |part: &str| part.trim().parse::<u16>().map_err(|_| format!("`{raw}` is not a port range like 25565-25599"));
+    let (start, end) = (parse(start)?, parse(end)?);
+    if start < 1024 || end < start {
+        return Err(format!("`{raw}`: the range must start at 1024 or higher and not run backwards"));
+    }
+    Ok(start..=end)
 }
 
 impl Config {
@@ -86,6 +124,26 @@ impl Config {
             stop_timeout: Duration::from_secs(5),
             fake_speed: 0.0,
             host_data_dir: None,
+            game_ports: None,
+            docker_network: None,
+            container_dns: Vec::new(),
+            public_servers: false,
+            dns: DnsConfig::Fake,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_port_range;
+
+    #[test]
+    fn parses_port_ranges() {
+        assert_eq!(parse_port_range("25565-25599"), Ok(25565..=25599));
+        assert_eq!(parse_port_range(" 30000 "), Ok(30000..=30000));
+        assert!(parse_port_range("25599-25565").is_err());
+        assert!(parse_port_range("80-90").is_err());
+        assert!(parse_port_range("25565-").is_err());
+        assert!(parse_port_range("all").is_err());
     }
 }

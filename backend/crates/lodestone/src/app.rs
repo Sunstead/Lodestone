@@ -20,7 +20,7 @@ use crate::host::HostSampler;
 use crate::jobs::Jobs;
 use crate::model::ContentSource;
 use crate::paths::Paths;
-use crate::runtime::docker::DockerRuntime;
+use crate::runtime::docker::{DockerOptions, DockerRuntime};
 use crate::runtime::fake::FakeRuntime;
 use crate::runtime::Runtime;
 use crate::software::fake::FakeSoftware;
@@ -54,6 +54,8 @@ pub struct Services {
     pub runtime: Arc<dyn Runtime>,
     pub host: HostSampler,
     pub instances: InstanceManager,
+    /// Servers' address names (SRV records).
+    pub dns: crate::dns::Dns,
 }
 
 pub type AppState = Arc<Services>;
@@ -111,10 +113,16 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     }
     let runtime: Arc<dyn Runtime> = match config.runtime {
         RuntimeKind::Fake => Arc::new(FakeRuntime::new(config.fake_speed, config.fake_speed > 0.0)),
-        RuntimeKind::Docker => Arc::new(DockerRuntime::connect(&config.data_dir, config.host_data_dir.clone())),
+        RuntimeKind::Docker => Arc::new(DockerRuntime::connect(
+            &config.data_dir,
+            config.host_data_dir.clone(),
+            DockerOptions { network: config.docker_network.clone(), dns: config.container_dns.clone() },
+        )),
     };
 
-    Ok(Arc::new(Services {
+    // Cloudflare is reached even with fake software providers.
+    let dns_http = http.clone().unwrap_or_default();
+    let state = Arc::new(Services {
         cookie: CookieSpec::for_url(config.public_url.as_ref()),
         auth,
         content: Providers::new(content),
@@ -125,13 +133,16 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         cache: BlobCache::new(paths.blobs(), http),
         host: HostSampler::start(config.data_dir.clone()),
         instances: InstanceManager::default(),
+        dns: crate::dns::Dns::new(&config.dns, dns_http),
         config,
         paths,
         store,
         events,
         software,
         runtime,
-    }))
+    });
+    crate::dns::spawn(Arc::downgrade(&state));
+    Ok(state)
 }
 
 pub fn router(state: AppState) -> Router {

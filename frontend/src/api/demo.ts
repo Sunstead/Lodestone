@@ -1051,6 +1051,9 @@ function hydrateInstance(seed: InstanceSeed): void {
     state: seed.state,
     players: seed.status.players ?? { online: 0, max: 20 },
     address: seed.ports.minecraft === 25565 ? 'localhost' : `localhost:${seed.ports.minecraft}`,
+    directAddress: seed.ports.minecraft === 25565 ? 'localhost' : `localhost:${seed.ports.minecraft}`,
+    hostname: null,
+    dns: null,
     ports: seed.ports,
     environment: seed.environment,
     createdAt: seed.createdAt,
@@ -1665,6 +1668,8 @@ export function createInstance(request: CreateInstanceRequest): Instance {
     used.add(candidate);
     return candidate;
   };
+  const hostname = request.hostname !== undefined ? normaliseHostname(request.hostname) : null;
+  if (hostname) claimHostname(hostname, null);
   const minecraftPort = claim(request.minecraftPort, 25565);
   const rconPort = claim(request.rconPort, 25575);
   const queryPort = request.queryPort !== undefined ? claim(request.queryPort, 25565) : null;
@@ -1682,7 +1687,10 @@ export function createInstance(request: CreateInstanceRequest): Instance {
     worldId,
     state: 'stopped',
     players: { online: 0, max: Number(profile.properties.find((f) => f.key === 'max-players')?.value ?? 20) },
-    address: minecraftPort === 25565 ? 'localhost' : `localhost:${minecraftPort}`,
+    address: '',
+    directAddress: '',
+    hostname,
+    dns: null,
     ports: { minecraft: minecraftPort, rcon: rconPort, query: queryPort },
     environment: request.environment ?? { TZ: 'UTC' },
     createdAt: iso(),
@@ -1712,6 +1720,7 @@ export function createInstance(request: CreateInstanceRequest): Instance {
     timer: null,
   };
 
+  applyAddress(instance);
   instances.set(id, demoInstance);
   world.world.attachedInstanceId = id;
   world.status.attached = true;
@@ -1728,14 +1737,75 @@ export function updateInstance(id: string, body: UpdateInstanceRequest): Instanc
   if (!entry) throw new Error(`no such instance: ${id}`);
   const instance = entry.instance;
   if (body.name !== undefined && body.name.trim()) instance.name = body.name.trim();
-  if (body.minecraftPort !== undefined) {
-    instance.ports.minecraft = body.minecraftPort;
-    instance.address = body.minecraftPort === 25565 ? 'localhost' : `localhost:${body.minecraftPort}`;
+  if (body.hostname !== undefined) {
+    const hostname = body.hostname === null ? null : normaliseHostname(body.hostname);
+    if (hostname) claimHostname(hostname, id);
+    instance.hostname = hostname;
   }
+  if (body.minecraftPort !== undefined) instance.ports.minecraft = body.minecraftPort;
   if (body.rconPort !== undefined) instance.ports.rcon = body.rconPort;
   if (body.queryPort !== undefined) instance.ports.query = body.queryPort;
   if (body.environment !== undefined) instance.environment = body.environment;
+  applyAddress(instance);
   return instance;
+}
+
+/* ------------------------------- addresses ----------------------------- */
+// The backend's dns.rs: an address name is one DNS label, unique across the
+// host, reached as <name>.<public address> through an SRV record. The demo
+// "creates" every record at once, like the backend's in-memory provider.
+
+function normaliseHostname(raw: string): string | null {
+  const name = raw.trim().toLowerCase();
+  if (!name) return null;
+  if (name.length > 63 || !/^[a-z0-9-]+$/.test(name) || name.startsWith('-') || name.endsWith('-')) {
+    throw new Error(
+      'An address name is one word of letters, digits and hyphens (not at either end), up to 63 characters, e.g. survival.',
+    );
+  }
+  return name;
+}
+
+function claimHostname(name: string, self: string | null): void {
+  for (const { instance } of instances.values()) {
+    if (instance.id !== self && instance.hostname === name) {
+      throw new Error(`Another server already uses the name "${name}". Pick another.`);
+    }
+  }
+}
+
+function isDomain(address: string): boolean {
+  return address !== '' && address.includes('.') && !address.includes(':') && !/^\d+(\.\d+){3}$/.test(address);
+}
+
+/** Fills address, directAddress and dns from the public address in Settings. */
+function applyAddress(instance: Instance): void {
+  const publicAddress = settings.publicAddress;
+  const host = publicAddress || 'localhost';
+  const port = instance.ports.minecraft;
+  instance.directAddress = port === 25565 ? host : `${host}:${port}`;
+  instance.dns = null;
+  instance.address = instance.directAddress;
+  if (!instance.hostname) return;
+  const name = `${instance.hostname}.${publicAddress}`;
+  if (!isDomain(publicAddress)) {
+    instance.dns = {
+      host: name,
+      record: '',
+      value: '',
+      status: 'unavailable',
+      message: 'Address names need the public address in Settings to be a domain name, e.g. play.example.com.',
+    };
+    return;
+  }
+  instance.dns = {
+    host: name,
+    record: `_minecraft._tcp.${name}`,
+    value: `0 5 ${port} ${publicAddress}`,
+    status: 'synced',
+    message: null,
+  };
+  instance.address = name;
 }
 
 export function deleteInstance(id: string): void {
@@ -2267,7 +2337,10 @@ export function getSettings(): AppSettings {
 }
 
 export function updateSettings(body: UpdateSettingsRequest): AppSettings {
-  if (body.publicAddress !== undefined) settings.publicAddress = body.publicAddress.trim();
+  if (body.publicAddress !== undefined) {
+    settings.publicAddress = body.publicAddress.trim().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    for (const { instance } of instances.values()) applyAddress(instance);
+  }
   if (body.defaultJavaArgs !== undefined) settings.defaultJavaArgs = body.defaultJavaArgs.trim();
   if (body.curseforgeApiKey !== undefined) {
     if (/\s/.test(body.curseforgeApiKey.trim())) throw new Error("That doesn't look like a CurseForge API key.");

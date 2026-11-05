@@ -494,7 +494,17 @@ pub struct Instance {
     pub world_id: String,
     pub state: ServerState,
     pub players: PlayerCount,
+    /// What players type to join: the address name (`survival.play.example.com`)
+    /// when the server has one and it can work, otherwise `directAddress`.
     pub address: String,
+    /// The public address and game port (`play.example.com:30001`), which
+    /// always works.
+    pub direct_address: String,
+    /// The server's address name, one DNS label (`survival`). Players join at
+    /// `<hostname>.<public address>` through an SRV record.
+    pub hostname: Option<String>,
+    /// The SRV record behind `hostname` and whether it's in place.
+    pub dns: Option<InstanceDns>,
     pub ports: InstancePorts,
     #[ts(type = "Record<string, string>")]
     pub environment: StringMap,
@@ -505,6 +515,39 @@ pub struct Instance {
     pub job_id: Option<String>,
     pub profile: InstanceProfileRef,
     pub world: InstanceWorldRef,
+}
+
+/// The SRV record that lets players join a server by name, without a port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct InstanceDns {
+    /// What players type, e.g. `survival.play.example.com`.
+    pub host: String,
+    /// The record's name, e.g. `_minecraft._tcp.survival.play.example.com`.
+    pub record: String,
+    /// The record's content as priority, weight, port and target, e.g.
+    /// `0 5 30001 play.example.com`.
+    pub value: String,
+    pub status: DnsStatus,
+    /// What to do about it, for `manual`, `error` and `unavailable`.
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum DnsStatus {
+    /// Lodestone created the record; players can use the name.
+    Synced,
+    /// Lodestone is creating or changing the record.
+    Pending,
+    /// Lodestone doesn't manage DNS here: someone adds the record by hand.
+    Manual,
+    /// The DNS provider refused or couldn't be reached; Lodestone retries.
+    Error,
+    /// The public address isn't a domain name, so there's nothing to point.
+    Unavailable,
 }
 
 /// Creates an instance, and optionally its world and profile, in one
@@ -529,6 +572,9 @@ pub struct CreateInstanceRequest {
     pub rcon_port: Option<u16>,
     #[ts(optional)]
     pub query_port: Option<u16>,
+    /// An address name, e.g. `survival` for `survival.play.example.com`.
+    #[ts(optional)]
+    pub hostname: Option<String>,
     #[ts(type = "Record<string, string>")]
     #[ts(optional)]
     pub environment: Option<StringMap>,
@@ -551,6 +597,11 @@ pub struct UpdateInstanceRequest {
     #[ts(type = "number | null")]
     #[ts(optional)]
     pub query_port: Option<Option<u16>>,
+    /// A new address name; `null` or `""` removes it.
+    #[serde(default, deserialize_with = "double_option")]
+    #[ts(type = "string | null")]
+    #[ts(optional)]
+    pub hostname: Option<Option<String>>,
     #[ts(type = "Record<string, string>")]
     #[ts(optional)]
     pub environment: Option<StringMap>,

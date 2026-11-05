@@ -46,6 +46,10 @@ pub struct InstanceRecord {
     pub profile_id: String,
     pub world_id: String,
     pub ports: InstancePorts,
+    /// The address name (one DNS label), unique across the host: also the
+    /// `hostname` column, which enforces that.
+    #[serde(default)]
+    pub hostname: Option<String>,
     pub environment: StringMap,
     /// Generated per instance; RCON is only published on 127.0.0.1.
     pub rcon_password: String,
@@ -216,14 +220,16 @@ impl Store {
     }
 
     pub async fn update_instance(&self, record: &InstanceRecord) -> AppResult<()> {
-        let result = sqlx::query("UPDATE instances SET data = ?, profile_id = ?, world_id = ? WHERE id = ?")
-            .bind(serde_json::to_string(record)?)
-            .bind(&record.profile_id)
-            .bind(&record.world_id)
-            .bind(&record.id)
-            .execute(&self.pool)
-            .await;
-        map_unique(result, "world_attached", "That world is already attached to another instance.")?;
+        let result =
+            sqlx::query("UPDATE instances SET data = ?, profile_id = ?, world_id = ?, hostname = ? WHERE id = ?")
+                .bind(serde_json::to_string(record)?)
+                .bind(&record.profile_id)
+                .bind(&record.world_id)
+                .bind(&record.hostname)
+                .bind(&record.id)
+                .execute(&self.pool)
+                .await;
+        map_instance_unique(result, record)?;
         Ok(())
     }
 
@@ -261,7 +267,8 @@ impl Store {
                 .await?;
         }
         let result = sqlx::query(
-            "INSERT INTO instances (id, profile_id, world_id, data, created_at, owner_id) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO instances (id, profile_id, world_id, data, created_at, owner_id, hostname) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&instance.id)
         .bind(&instance.profile_id)
@@ -269,9 +276,10 @@ impl Store {
         .bind(serde_json::to_string(instance)?)
         .bind(&instance.created_at)
         .bind(owner)
+        .bind(&instance.hostname)
         .execute(&mut *tx)
         .await;
-        map_unique(result, "world_attached", "That world is already attached to another instance.")?;
+        map_instance_unique(result, instance)?;
         tx.commit().await?;
         Ok(())
     }
@@ -593,6 +601,25 @@ fn map_fk<T>(result: Result<T, sqlx::Error>, code: &'static str, message: &str) 
             }
         },
     )
+}
+
+/// Instances have two unique columns: the attached world and the address name.
+fn map_instance_unique<T>(result: Result<T, sqlx::Error>, record: &InstanceRecord) -> AppResult<T> {
+    result.map_err(|err| {
+        if is_constraint(&err, "instances.hostname") {
+            AppError::conflict(
+                "hostname_taken",
+                format!(
+                    "Another server already uses the name \"{}\". Pick another.",
+                    record.hostname.as_deref().unwrap_or_default()
+                ),
+            )
+        } else if is_constraint(&err, "UNIQUE") {
+            AppError::conflict("world_attached", "That world is already attached to another instance.")
+        } else {
+            err.into()
+        }
+    })
 }
 
 fn map_unique<T>(result: Result<T, sqlx::Error>, code: &'static str, message: &str) -> AppResult<T> {

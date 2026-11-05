@@ -17,23 +17,34 @@ use crate::app::AppState;
 use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    ActionRequest, BanEntry, CommandRequest, ConsoleLine, CreateInstanceRequest, Instance, InstancePorts,
+    ActionRequest, BanEntry, CommandRequest, ConsoleLine, CreateInstanceRequest, DnsStatus, Instance, InstancePorts,
     InstanceProfileRef, InstanceStatus, InstanceWorldRef, JobKind, Player, PlayerActionKind, PlayerActionRequest,
     PlayerCount, ResourceKind, ServerAction, ServerPlayers, ServerState, SwitchWorldRequest, UpdateInstanceRequest,
     World,
 };
-use crate::ports;
 use crate::store::{Asset, InstanceRecord, PlayerRef, ProfileRecord};
 use crate::supervisor;
 use crate::util::{new_id, now_iso, secret};
+use crate::{dns, ports};
 
 /* ------------------------------------------------------------------------ */
 /* DTO assembly                                                             */
 /* ------------------------------------------------------------------------ */
 
-fn build(app: &AppState, record: &InstanceRecord, profile: &ProfileRecord, world: &World, host: &str) -> Instance {
+/// `public_address` is Settings' value as it is (blank when unset).
+fn build(
+    app: &AppState,
+    record: &InstanceRecord,
+    profile: &ProfileRecord,
+    world: &World,
+    public_address: &str,
+) -> Instance {
     let snapshot = app.instances.snapshot(&record.id, record.last_error.as_deref());
     let max = profile.properties.get("max-players").and_then(|value| value.parse().ok()).unwrap_or(20);
+    let host = if public_address.is_empty() { "localhost" } else { public_address };
+    let direct_address =
+        if record.ports.minecraft == 25565 { host.to_owned() } else { format!("{host}:{}", record.ports.minecraft) };
+    let dns = app.dns.status(record, public_address);
     Instance {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -41,11 +52,13 @@ fn build(app: &AppState, record: &InstanceRecord, profile: &ProfileRecord, world
         world_id: record.world_id.clone(),
         state: snapshot.state,
         players: PlayerCount { online: snapshot.online, max },
-        address: if record.ports.minecraft == 25565 {
-            host.to_owned()
-        } else {
-            format!("{host}:{}", record.ports.minecraft)
+        address: match &dns {
+            Some(dns) if dns.status != DnsStatus::Unavailable => dns.host.clone(),
+            _ => direct_address.clone(),
         },
+        direct_address,
+        hostname: record.hostname.clone(),
+        dns,
         ports: record.ports,
         environment: record.environment.clone(),
         created_at: record.created_at.clone(),
@@ -60,16 +73,15 @@ fn build(app: &AppState, record: &InstanceRecord, profile: &ProfileRecord, world
     }
 }
 
-async fn public_host(app: &AppState) -> AppResult<String> {
-    let address = app.store.settings().await?.public_address;
-    Ok(if address.is_empty() { "localhost".into() } else { address })
+async fn public_address(app: &AppState) -> AppResult<String> {
+    Ok(app.store.settings().await?.public_address)
 }
 
 async fn load(app: &AppState, id: &str) -> AppResult<Instance> {
     let record = app.store.get_instance(id).await?;
     let profile = app.store.get_profile(&record.profile_id).await?;
     let world = app.store.get_world(&record.world_id).await?;
-    Ok(build(app, &record, &profile, &world, &public_host(app).await?))
+    Ok(build(app, &record, &profile, &world, &public_address(app).await?))
 }
 
 pub async fn list(State(app): State<AppState>, user: CurrentUser) -> AppResult<Json<Vec<Instance>>> {
@@ -77,7 +89,7 @@ pub async fn list(State(app): State<AppState>, user: CurrentUser) -> AppResult<J
     let profiles: HashMap<_, _> =
         app.store.list_profiles(mine).await?.into_iter().map(|p| (p.profile.id.clone(), p)).collect();
     let worlds: HashMap<_, _> = app.store.list_worlds(mine).await?.into_iter().map(|w| (w.id.clone(), w)).collect();
-    let host = public_host(&app).await?;
+    let host = public_address(&app).await?;
     let mut out = Vec::new();
     for record in app.store.list_instances(mine).await? {
         if let (Some(profile), Some(world)) = (profiles.get(&record.profile_id), worlds.get(&record.world_id)) {
@@ -120,6 +132,57 @@ fn claim(port: u16, used: &mut HashSet<u16>, what: &str) -> AppResult<u16> {
         return Err(AppError::conflict("port_in_use", format!("Port {port} is already used by another instance.")));
     }
     Ok(port)
+}
+
+/// Which host ports each kind may use. With a game-port range (servers
+/// forwarded from the internet), game ports stay inside it, RCON outside it,
+/// and there is no query port: it would be published on every interface and
+/// the edge doesn't forward it.
+struct PortRules(Option<std::ops::RangeInclusive<u16>>);
+
+impl PortRules {
+    fn game_range(&self) -> std::ops::RangeInclusive<u16> {
+        self.0.clone().unwrap_or(25565..=u16::MAX)
+    }
+
+    fn game(&self, port: u16) -> AppResult<u16> {
+        match &self.0 {
+            Some(range) if !range.contains(&port) => Err(AppError::bad_request(format!(
+                "Game ports on this host are {}–{}; {port} is outside them.",
+                range.start(),
+                range.end()
+            ))),
+            _ => Ok(port),
+        }
+    }
+
+    fn rcon(&self, port: u16) -> AppResult<u16> {
+        match &self.0 {
+            Some(range) if range.contains(&port) => Err(AppError::bad_request(format!(
+                "Ports {}–{} are for game connections; pick an RCON port outside them.",
+                range.start(),
+                range.end()
+            ))),
+            _ => Ok(port),
+        }
+    }
+
+    fn query(&self) -> AppResult<()> {
+        if self.0.is_some() {
+            return Err(AppError::bad_request(
+                "The query port isn't available on this host: servers here are public, and only game connections are forwarded.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A free RCON port, never inside the game range.
+    fn allocate_rcon(&self, used: &HashSet<u16>) -> Option<u16> {
+        let game = self.0.clone();
+        ports::allocate_with(25575..=u16::MAX, used, |port| {
+            !game.as_ref().is_some_and(|range| range.contains(&port)) && ports::is_free(Ipv4Addr::LOCALHOST, port)
+        })
+    }
 }
 
 /// A server is made of its owner's own world and profile, even for admins.
@@ -174,27 +237,37 @@ pub async fn create(
     };
     supervisor::check_world_compatible(&world, &profile)?;
 
+    let rules = PortRules(app.config.game_ports.clone());
     let mut used = used_ports(&app, None).await?;
     let minecraft = match req.minecraft_port {
-        Some(port) => claim(port, &mut used, "Minecraft")?,
+        Some(port) => claim(rules.game(port)?, &mut used, "Minecraft")?,
         None => {
-            let port = ports::allocate(25565, &used, Ipv4Addr::UNSPECIFIED)
+            let port = ports::allocate(rules.game_range(), &used, Ipv4Addr::UNSPECIFIED)
                 .ok_or_else(|| AppError::conflict("no_free_port", "No free Minecraft port found."))?;
             used.insert(port);
             port
         }
     };
     let rcon = match req.rcon_port {
-        Some(port) => claim(port, &mut used, "RCON")?,
+        Some(port) => claim(rules.rcon(port)?, &mut used, "RCON")?,
         None => {
-            let port = ports::allocate(25575, &used, Ipv4Addr::LOCALHOST)
+            let port = rules
+                .allocate_rcon(&used)
                 .ok_or_else(|| AppError::conflict("no_free_port", "No free RCON port found."))?;
             used.insert(port);
             port
         }
     };
     let query = match req.query_port {
-        Some(port) => Some(claim(port, &mut used, "query")?),
+        Some(port) => {
+            rules.query()?;
+            Some(claim(port, &mut used, "query")?)
+        }
+        None => None,
+    };
+
+    let hostname = match &req.hostname {
+        Some(raw) => dns::normalise_hostname(raw)?,
         None => None,
     };
 
@@ -204,6 +277,7 @@ pub async fn create(
         profile_id: profile.profile.id.clone(),
         world_id: world.id.clone(),
         ports: InstancePorts { minecraft, rcon, query },
+        hostname,
         environment: req.environment.unwrap_or_default(),
         rcon_password: secret(24),
         created_at: now_iso(),
@@ -223,6 +297,7 @@ pub async fn create(
     app.events.changed(ResourceKind::Worlds, Some(world.id.clone()));
     app.events.changed(ResourceKind::Profiles, Some(profile.profile.id.clone()));
     app.events.changed(ResourceKind::Instances, Some(record.id.clone()));
+    app.dns.changed();
 
     if req.start == Some(true) {
         supervisor::start(&app, &record.id).await?;
@@ -249,6 +324,18 @@ pub async fn update(
         }
         record.name = name.to_owned();
     }
+    // The range rules apply to the ports being changed, so an instance from
+    // before the range was set can still be renamed.
+    let rules = PortRules(app.config.game_ports.clone());
+    if let Some(port) = patch.minecraft_port {
+        rules.game(port)?;
+    }
+    if let Some(port) = patch.rcon_port {
+        rules.rcon(port)?;
+    }
+    if let Some(Some(_)) = patch.query_port {
+        rules.query()?;
+    }
     let mut used = used_ports(&app, Some(&id)).await?;
     let minecraft = claim(patch.minecraft_port.unwrap_or(record.ports.minecraft), &mut used, "Minecraft")?;
     let rcon = claim(patch.rcon_port.unwrap_or(record.ports.rcon), &mut used, "RCON")?;
@@ -257,11 +344,18 @@ pub async fn update(
         None => None,
     };
     record.ports = InstancePorts { minecraft, rcon, query };
+    if let Some(hostname) = patch.hostname {
+        record.hostname = match hostname {
+            Some(raw) => dns::normalise_hostname(&raw)?,
+            None => None,
+        };
+    }
     if let Some(env) = patch.environment {
         record.environment = env;
     }
     app.store.update_instance(&record).await?;
     app.events.changed(ResourceKind::Instances, Some(id.clone()));
+    app.dns.changed();
     Ok(Json(load(&app, &id).await?))
 }
 
@@ -277,6 +371,7 @@ pub async fn delete(State(app): State<AppState>, user: CurrentUser, Path(id): Pa
     app.instances.forget(&id);
     let _ = tokio::fs::remove_dir_all(app.paths.instance(&id)).await;
     app.events.deleted(ResourceKind::Instances, &id);
+    app.dns.changed();
     app.events.changed(ResourceKind::Worlds, Some(record.world_id));
     app.events.changed(ResourceKind::Profiles, Some(record.profile_id));
     Ok(StatusCode::NO_CONTENT)

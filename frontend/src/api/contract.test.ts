@@ -179,6 +179,45 @@ describe.each(targets)('contract: $name', ({ mode, base }) => {
     expect((await api.listAllBackups()).some((entry) => entry.id === backup.id)).toBe(true);
   });
 
+  it('gives servers address names through SRV records', async () => {
+    const tag = unique();
+    const name = `n${tag}`;
+    await api.updateSettings({ publicAddress: 'play.example.com' });
+    try {
+      const instance = await api.createInstance({
+        name: `named-${tag}`,
+        newWorld: worldSpec(`Named ${tag}`),
+        newProfile: profileSpec(`Named ${tag}`),
+        hostname: ` ${name.toUpperCase()} `,
+      });
+      expect(instance.hostname).toBe(name);
+      const port = instance.ports.minecraft;
+      const direct = port === 25565 ? 'play.example.com' : `play.example.com:${port}`;
+      expect(instance.directAddress).toBe(direct);
+      const synced = await until('the SRV record', () => api.getInstance(instance.id), (i: Instance) => i.dns?.status === 'synced');
+      expect(synced.address).toBe(`${name}.play.example.com`);
+      expect(synced.dns).toMatchObject({
+        host: `${name}.play.example.com`,
+        record: `_minecraft._tcp.${name}.play.example.com`,
+        value: `0 5 ${port} play.example.com`,
+      });
+
+      // One DNS label, and no two servers share a name.
+      await expect(api.updateInstance(instance.id, { hostname: 'a.b' })).rejects.toThrow(/one word/);
+      await expect(
+        api.createInstance({ name: `dup-${tag}`, newWorld: worldSpec(`Dup ${tag}`), newProfile: profileSpec(`Dup ${tag}`), hostname: name }),
+      ).rejects.toThrow(/already uses the name/);
+
+      const cleared = await api.updateInstance(instance.id, { hostname: null });
+      expect(cleared.hostname).toBeNull();
+      expect(cleared.dns).toBeNull();
+      expect(cleared.address).toBe(direct);
+      await api.deleteInstance(instance.id);
+    } finally {
+      await api.updateSettings({ publicAddress: '' });
+    }
+  });
+
   it('reads and writes app settings', async () => {
     const settings = await api.updateSettings({ publicAddress: 'play.example.com' });
     expect(settings.publicAddress).toBe('play.example.com');

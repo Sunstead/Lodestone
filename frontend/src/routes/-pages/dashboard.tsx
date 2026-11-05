@@ -17,9 +17,10 @@ import {
   TableHeader,
   TableRow,
 } from '@sunstead/ui/components/table';
-import { useConsoleTail, useInstance, useInstanceStatus, usePlayers } from '#/api/queries';
+import { useConsoleTail, useInstance, useInstanceStatus, usePlayers, useSettings } from '#/api/queries';
 import type { ConsoleLine, InstanceStatus } from '#/api/types';
 import { KeyValue, SectionHeading } from '#/components/page-parts';
+import { ServerAddressCard } from '#/components/server-address-card';
 import { ServerStateBadge } from '#/components/server-state';
 import {
   formatBytes,
@@ -195,6 +196,7 @@ export function DashboardPage({
   const instanceQuery = useInstance(instanceId);
   const players = usePlayers(instanceId);
   const consoleTail = useConsoleTail(instanceId);
+  const settings = useSettings();
   const [latest, setLatest] = useState<ConsoleLine[]>([]);
 
   useEffect(() => {
@@ -282,6 +284,8 @@ export function DashboardPage({
           </CardContent>
         </Card>
       ) : null}
+
+      {instance ? <ServerAddressCard instance={instance} publicAddress={settings.data?.publicAddress ?? ''} /> : null}
 
       <section aria-label='Server summary' className='grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4'>
         <StatCard

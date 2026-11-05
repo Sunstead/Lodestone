@@ -158,8 +158,10 @@ pub async fn patch_settings(
     }
     app.store.put_settings(&settings).await?;
     app.events.changed(ResourceKind::Settings, None);
-    // Addresses are rendered on instances.
+    // Addresses are rendered on instances, and every address name hangs off
+    // the public address. (After saving: the sync reads the store.)
     app.events.changed(ResourceKind::Instances, None);
+    app.dns.changed();
     Ok(Json(self::settings(&app).await?))
 }
 

@@ -206,7 +206,7 @@ fn property_file(app: &AppState, record: &ProfileRecord) -> PropertyFile {
     PropertyFile {
         path: app.paths.profile(&record.profile.id).display().to_string(),
         updated_at: record.profile.updated_at.clone(),
-        fields: properties::profile_fields(&record.properties),
+        fields: properties::profile_fields(&record.properties, app.config.public_servers),
     }
 }
 
@@ -227,7 +227,7 @@ pub async fn save_properties(
     Json(req): Json<SavePropertiesRequest>,
 ) -> AppResult<Json<PropertyFile>> {
     user.check(&app.store, Asset::Profile, &id).await?;
-    properties::validate_profile_changes(&req.changes)?;
+    properties::validate_profile_changes(&req.changes, app.config.public_servers)?;
     let mut record = app.store.get_profile(&id).await?;
     for (key, value) in req.changes {
         let default = properties::field(&key).map(|field| field.default_value.as_str());

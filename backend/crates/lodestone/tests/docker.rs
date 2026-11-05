@@ -23,6 +23,10 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 const BOOT_TIMEOUT: Duration = Duration::from_secs(600);
+/// Every test runs servers the way a public host does: on their own network,
+/// with public DNS, so downloads, Mojang and installers are proven to work
+/// from there.
+const NETWORK: &str = "lodestone-test";
 
 fn free_port() -> u16 {
     TcpListener::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port()
@@ -46,6 +50,8 @@ fn config(dir: PathBuf) -> Config {
         runtime: RuntimeKind::Docker,
         providers: ProviderKind::Real,
         stop_timeout: Duration::from_secs(60),
+        docker_network: Some(NETWORK.into()),
+        container_dns: vec!["1.1.1.1".into(), "9.9.9.9".into()],
         ..Config::fake(dir)
     }
 }
@@ -270,4 +276,51 @@ async fn reattaches_after_a_lodestone_restart() {
     second.post(&format!("/instances/{id}/actions"), json!({ "action": "stop" })).await;
     second.wait_state(&id, "stopped").await;
     let _ = &second.state;
+}
+
+fn docker(args: &[&str]) -> (bool, String) {
+    let output = std::process::Command::new("docker").args(args).output().expect("the docker CLI");
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success(), text)
+}
+
+/// The container hardening and the network's isolation, on a real server.
+#[tokio::test]
+async fn servers_are_hardened_and_isolated() {
+    let app = Lodestone::boot(data_dir("isolated")).await;
+    let instance = app.create("vanilla", "1.21.4").await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    app.wait_state(&id, "running").await;
+
+    let (_, container) = docker(&["ps", "-q", "--filter", &format!("label=lodestone.instance={id}")]);
+    assert!(!container.is_empty(), "no container for {id}");
+    let inspect = |format: &str| docker(&["inspect", "-f", format, &container]).1;
+    assert_eq!(inspect("{{.HostConfig.NetworkMode}}"), NETWORK);
+    assert_eq!(inspect("{{json .HostConfig.CapDrop}}"), r#"["ALL"]"#);
+    assert!(inspect("{{json .HostConfig.SecurityOpt}}").contains("no-new-privileges"));
+    assert_eq!(inspect("{{.HostConfig.PidsLimit}}"), "4096");
+    assert_eq!(
+        docker(&["network", "inspect", "-f", "{{index .Options \"com.docker.network.bridge.enable_icc\"}}", NETWORK]).1,
+        "false"
+    );
+
+    // Another container on the same network can't reach the server...
+    let server_ip = inspect(&format!("{{{{(index .NetworkSettings.Networks \"{NETWORK}\").IPAddress}}}}"));
+    assert!(!server_ip.is_empty());
+    let image = inspect("{{.Config.Image}}");
+    let probe = |target: &str| {
+        let script = format!("timeout 5 bash -c '</dev/tcp/{target}' && echo open || echo closed");
+        docker(&["run", "--rm", "--network", NETWORK, "--cap-drop", "ALL", &image, "bash", "-c", &script]).1
+    };
+    assert_eq!(probe(&format!("{server_ip}/25565")), "closed");
+    // ...while the internet still works from there.
+    assert_eq!(probe("1.1.1.1/443"), "open");
+
+    // The game port is still published to the host.
+    let port = instance["ports"]["minecraft"].as_u64().unwrap() as u16;
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(), "game port {port} not reachable");
+
+    app.post(&format!("/instances/{id}/actions"), json!({ "action": "stop" })).await;
+    app.wait_state(&id, "stopped").await;
 }

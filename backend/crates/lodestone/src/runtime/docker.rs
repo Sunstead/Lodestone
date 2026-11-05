@@ -16,6 +16,7 @@ use bollard::container::{
 use bollard::errors::Error as DockerError;
 use bollard::image::CreateImageOptions;
 use bollard::models::{HostConfig, PortBinding};
+use bollard::network::{CreateNetworkOptions, InspectNetworkOptions};
 use bollard::Docker;
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -29,6 +30,39 @@ use crate::properties::{CONTAINER_GAME_PORT, CONTAINER_QUERY_PORT, CONTAINER_RCO
 /// Label that marks containers Lodestone owns, valued with the instance id.
 pub const INSTANCE_LABEL: &str = "lodestone.instance";
 
+/// Servers run mods and plugins anyone with an account can upload, so their
+/// containers get no capabilities, can't gain privileges, and can't fork
+/// without bound. Java needs none of what's dropped: it runs as the data
+/// dir's owner and listens on ports above 1024.
+const PIDS_LIMIT: i64 = 4096;
+const ICC_OPTION: &str = "com.docker.network.bridge.enable_icc";
+const BRIDGE_NAME_OPTION: &str = "com.docker.network.bridge.name";
+
+/// Where server containers connect.
+#[derive(Debug, Clone, Default)]
+pub struct DockerOptions {
+    /// A dedicated bridge network, created when missing with traffic between
+    /// containers off. Its Linux bridge has the same name, so the host
+    /// firewall can match it (`docs/deploy.md`). `None`: Docker's default.
+    pub network: Option<String>,
+    /// DNS servers for the containers. `[]`: Docker's default.
+    pub dns: Vec<String>,
+}
+
+/// A network name that's also a valid Linux interface name (the bridge).
+pub fn check_network_name(name: &str) -> Result<(), String> {
+    let valid = !name.is_empty()
+        && name.len() <= 15
+        && name.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{name}`: the Docker network's name is also its bridge's, so use 1-15 letters, digits, '-', '_' or '.'"
+        ))
+    }
+}
+
 pub struct DockerRuntime {
     docker: Option<Docker>,
     connect_error: Option<String>,
@@ -37,10 +71,11 @@ pub struct DockerRuntime {
     path_map: Option<(PathBuf, PathBuf)>,
     /// `uid:gid` that owns the data dir, so server files stay editable.
     user: Option<String>,
+    options: DockerOptions,
 }
 
 impl DockerRuntime {
-    pub fn connect(data_dir: &Path, host_data_dir: Option<PathBuf>) -> Self {
+    pub fn connect(data_dir: &Path, host_data_dir: Option<PathBuf>, options: DockerOptions) -> Self {
         let (docker, connect_error) = match connect() {
             Ok(docker) => (Some(docker), None),
             Err(err) => (None, Some(err)),
@@ -50,6 +85,65 @@ impl DockerRuntime {
             connect_error,
             path_map: host_data_dir.map(|host| (data_dir.to_path_buf(), host)),
             user: owner_of(data_dir),
+            options,
+        }
+    }
+
+    /// Makes sure the servers' network exists and isolates containers from
+    /// each other. One Lodestone didn't create is accepted only if it does.
+    async fn ensure_network(&self, docker: &Docker) -> AppResult<()> {
+        let Some(name) = &self.options.network else { return Ok(()) };
+        let inspect = || docker.inspect_network(name, None::<InspectNetworkOptions<String>>);
+        let network = match inspect().await {
+            Ok(network) => network,
+            Err(DockerError::DockerResponseServerError { status_code: 404, .. }) => {
+                let options = CreateNetworkOptions {
+                    name: name.as_str(),
+                    driver: "bridge",
+                    options: HashMap::from([(ICC_OPTION, "false"), (BRIDGE_NAME_OPTION, name.as_str())]),
+                    labels: HashMap::from([("lodestone", "servers")]),
+                    ..Default::default()
+                };
+                match docker.create_network(options).await {
+                    Ok(_) => tracing::info!(network = %name, "created the servers' Docker network"),
+                    // Another start created it first.
+                    Err(DockerError::DockerResponseServerError { status_code: 409, .. }) => {}
+                    Err(err) => return Err(docker_err(&format!("creating the Docker network {name}"), err)),
+                }
+                inspect().await.map_err(|err| docker_err(&format!("inspecting the Docker network {name}"), err))?
+            }
+            Err(err) => return Err(docker_err(&format!("inspecting the Docker network {name}"), err)),
+        };
+        let options = network.options.unwrap_or_default();
+        let isolated = network.driver.as_deref() == Some("bridge")
+            && options.get(ICC_OPTION).map(String::as_str) == Some("false")
+            && options.get(BRIDGE_NAME_OPTION) == Some(name);
+        if !isolated {
+            return Err(AppError::conflict(
+                "network_unsafe",
+                format!(
+                    "The Docker network \"{name}\" isn't one Lodestone can use: servers need a bridge network named \
+                     \"{name}\" with traffic between containers off. Remove it (docker network rm {name}) and \
+                     Lodestone will create it."
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// What every container Lodestone runs shares: the network, DNS and the
+    /// hardening above.
+    fn host_config(&self, binds: Vec<String>, memory_mb: u32) -> HostConfig {
+        HostConfig {
+            binds: Some(binds),
+            memory: Some(memory_mb as i64 * 1024 * 1024),
+            init: Some(true),
+            network_mode: self.options.network.clone(),
+            dns: (!self.options.dns.is_empty()).then(|| self.options.dns.clone()),
+            cap_drop: Some(vec!["ALL".into()]),
+            security_opt: Some(vec!["no-new-privileges:true".into()]),
+            pids_limit: Some(PIDS_LIMIT),
+            ..Default::default()
         }
     }
 
@@ -203,6 +297,7 @@ impl Runtime for DockerRuntime {
 
     async fn start(&self, spec: &LaunchSpec) -> AppResult<Process> {
         let docker = self.docker()?.clone();
+        self.ensure_network(&docker).await?;
         // A container left over from a crash of Lodestone would block the name.
         let _ = docker
             .remove_container(&spec.container_name, Some(RemoveContainerOptions { force: true, ..Default::default() }))
@@ -250,12 +345,9 @@ impl Runtime for DockerRuntime {
             attach_stdin: Some(false),
             tty: Some(false),
             host_config: Some(HostConfig {
-                binds: Some(binds),
                 port_bindings: Some(ports),
-                memory: Some(spec.memory_limit_mb as i64 * 1024 * 1024),
                 nano_cpus: spec.cpu_cores.map(|cores| (cores * 1e9) as i64),
-                init: Some(true),
-                ..Default::default()
+                ..self.host_config(binds, spec.memory_limit_mb)
             }),
             ..Default::default()
         };
@@ -287,6 +379,9 @@ impl Runtime for DockerRuntime {
 
     async fn run_task(&self, task: &TaskSpec, job: &JobHandle) -> AppResult<TaskOutput> {
         let docker = self.docker()?.clone();
+        // Installers run third-party code and download libraries: the same
+        // network and limits as servers.
+        self.ensure_network(&docker).await?;
         let name = format!("lodestone-task-{}-{}", task.name, crate::util::secret(6).to_lowercase());
         let binds = task
             .mounts
@@ -307,12 +402,7 @@ impl Runtime for DockerRuntime {
             env: Some(vec![format!("HOME={}", task.workdir)]),
             user: self.user.clone(),
             tty: Some(false),
-            host_config: Some(HostConfig {
-                binds: Some(binds),
-                memory: Some(task.memory_limit_mb as i64 * 1024 * 1024),
-                init: Some(true),
-                ..Default::default()
-            }),
+            host_config: Some(self.host_config(binds, task.memory_limit_mb)),
             ..Default::default()
         };
         let created = docker
@@ -453,6 +543,7 @@ mod tests {
             connect_error: Some("test".into()),
             path_map: Some(("/data".into(), "/srv/lodestone".into())),
             user: None,
+            options: DockerOptions::default(),
         };
         assert_eq!(runtime.host_path(Path::new("/data/worlds/w1")), "/srv/lodestone/worlds/w1");
         assert_eq!(runtime.host_path(Path::new("/elsewhere/x")), "/elsewhere/x");
@@ -460,9 +551,46 @@ mod tests {
 
     #[test]
     fn unreachable_docker_explains_itself() {
-        let runtime =
-            DockerRuntime { docker: None, connect_error: Some("no socket".into()), path_map: None, user: None };
+        let runtime = DockerRuntime {
+            docker: None,
+            connect_error: Some("no socket".into()),
+            path_map: None,
+            user: None,
+            options: DockerOptions::default(),
+        };
         let err = runtime.docker().unwrap_err();
         assert!(err.to_string().contains("Start Docker"));
+    }
+
+    #[test]
+    fn containers_are_hardened_and_isolated() {
+        let runtime = DockerRuntime {
+            docker: None,
+            connect_error: None,
+            path_map: None,
+            user: None,
+            options: DockerOptions { network: Some("lodestone".into()), dns: vec!["1.1.1.1".into()] },
+        };
+        let config = runtime.host_config(vec![], 1024);
+        assert_eq!(config.network_mode.as_deref(), Some("lodestone"));
+        assert_eq!(config.dns, Some(vec!["1.1.1.1".to_owned()]));
+        assert_eq!(config.cap_drop, Some(vec!["ALL".to_owned()]));
+        assert_eq!(config.security_opt, Some(vec!["no-new-privileges:true".to_owned()]));
+        assert_eq!(config.pids_limit, Some(PIDS_LIMIT));
+        assert_eq!(config.memory, Some(1024 * 1024 * 1024));
+
+        let default = DockerRuntime { options: DockerOptions::default(), ..runtime };
+        let config = default.host_config(vec![], 1024);
+        assert_eq!((config.network_mode, config.dns), (None, None));
+        assert_eq!(config.cap_drop, Some(vec!["ALL".to_owned()]));
+    }
+
+    #[test]
+    fn network_names_are_bridge_names() {
+        assert!(check_network_name("lodestone").is_ok());
+        assert!(check_network_name("ls-servers_1.0").is_ok());
+        assert!(check_network_name("").is_err());
+        assert!(check_network_name("a-name-that-is-too-long").is_err());
+        assert!(check_network_name("bad name").is_err());
     }
 }

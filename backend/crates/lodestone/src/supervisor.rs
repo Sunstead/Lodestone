@@ -27,8 +27,8 @@ use crate::error::{AppError, AppResult};
 use crate::jobs::JobHandle;
 use crate::logparse;
 use crate::model::{
-    ConsoleLine, ConsoleSource, ContainerInfo, DiskUsage, InstanceStatus, JobKind, LogLevel, MemoryUsage, NetworkUsage,
-    PlayerCount, ResourceKind, ServerSoftwareId, ServerState, World, WorldLayout,
+    ConsoleLine, ConsoleSource, ContainerInfo, DiskUsage, InstancePorts, InstanceStatus, JobKind, LogLevel,
+    MemoryUsage, NetworkUsage, PlayerCount, ResourceKind, ServerSoftwareId, ServerState, World, WorldLayout,
 };
 use crate::properties;
 use crate::runtime::{LaunchSpec, Mount, ProcessEvent, ProcessStats};
@@ -386,7 +386,10 @@ async fn prepare(
     for dir in [&run_dir, &universe, &profile_dir] {
         tokio::fs::create_dir_all(dir).await?;
     }
-    write_run_files(&run_dir, record, profile, world).await?;
+    // A host whose game ports face the internet runs no query port, even for
+    // an instance that had one before the range was set.
+    let query_ports = app.config.game_ports.is_none();
+    write_run_files(&run_dir, record, profile, world, query_ports, app.config.public_servers).await?;
 
     let mut mounts = vec![
         Mount { host: run_dir.clone(), container: "/server".into(), read_only: false },
@@ -444,7 +447,7 @@ async fn prepare(
         workdir: "/server".into(),
         command,
         env,
-        ports: record.ports,
+        ports: InstancePorts { query: record.ports.query.filter(|_| query_ports), ..record.ports },
         // Heap plus room for metaspace, threads and native buffers.
         memory_limit_mb: p.memory.max_mb + (p.memory.max_mb / 4).max(512),
         cpu_cores: p.cpu_cores,
@@ -536,8 +539,16 @@ async fn write_run_files(
     record: &InstanceRecord,
     profile: &ProfileRecord,
     world: &World,
+    query_ports: bool,
+    public_servers: bool,
 ) -> AppResult<()> {
-    let props = properties::render(world, &profile.properties, &record.rcon_password, record.ports.query.is_some());
+    let props = properties::render(
+        world,
+        &profile.properties,
+        &record.rcon_password,
+        query_ports && record.ports.query.is_some(),
+        public_servers,
+    );
     tokio::fs::write(run_dir.join("server.properties"), props).await?;
     // Only written because the server's owner accepted the EULA in Lodestone.
     tokio::fs::write(

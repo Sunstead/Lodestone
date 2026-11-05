@@ -507,6 +507,197 @@ async fn profile_properties_respect_ownership() {
 }
 
 #[tokio::test]
+async fn game_port_range_keeps_ports_in_their_place() {
+    let app = TestApp::with(|config| config.game_ports = Some(25590..=25599)).await;
+    let in_range = |port: &Value| (25590..=25599).contains(&port.as_u64().unwrap());
+
+    // Allocated: the game port inside the range, RCON outside it.
+    let (status, instance) = app
+        .post(
+            "/instances",
+            json!({ "name": "auto", "newWorld": world_spec("Auto"), "newProfile": profile_spec("paper", "1.21.4") }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{instance}");
+    assert!(in_range(&instance["ports"]["minecraft"]), "{instance}");
+    assert!(!in_range(&instance["ports"]["rcon"]), "{instance}");
+    assert!(instance["ports"]["query"].is_null());
+    let id = instance["id"].as_str().unwrap().to_owned();
+
+    // Explicit ports: the game port must be inside, RCON outside, no query.
+    let (status, err) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "minecraftPort": 25600 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("25590–25599"), "{err}");
+    let (status, err) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "rconPort": 25595 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("RCON"), "{err}");
+    let (status, err) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "queryPort": 25596 }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("query"), "{err}");
+    let ok = app.create_instance(json!({ "name": "explicit", "minecraftPort": 25598 })).await;
+    assert_eq!(ok["ports"]["minecraft"], 25598);
+
+    // The same rules for changes; other edits still work.
+    let path = format!("/instances/{id}");
+    let (status, _) = app.call(Method::PATCH, &path, Some(json!({ "minecraftPort": 30000 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = app.call(Method::PATCH, &path, Some(json!({ "queryPort": 25597 }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, renamed) = app.call(Method::PATCH, &path, Some(json!({ "name": "renamed" }))).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+
+    // The range runs out rather than spilling over.
+    let mut seen = 2;
+    loop {
+        let (status, body) = app
+            .post("/instances", json!({ "name": "more", "newWorld": world_spec("More"), "newProfile": profile_spec("paper", "1.21.4") }))
+            .await;
+        if status == StatusCode::CONFLICT {
+            assert_eq!(body["error"]["code"], "no_free_port");
+            break;
+        }
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(in_range(&body["ports"]["minecraft"]), "{body}");
+        seen += 1;
+        assert!(seen <= 10, "more instances than ports in the range");
+    }
+
+    // Started: no query in server.properties.
+    let (status, _) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    assert_eq!(status, StatusCode::OK);
+    app.wait_state(&id, "running").await;
+    let props = std::fs::read_to_string(app.state.paths.instance(&id).join("server.properties")).unwrap();
+    assert!(props.contains("enable-query=false"), "{props}");
+}
+
+#[tokio::test]
+async fn public_servers_keep_online_mode_on() {
+    let app = TestApp::with(|config| config.public_servers = true).await;
+    let instance = app.create_instance(json!({})).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    let path = format!("/profiles/{}/properties", instance["profileId"].as_str().unwrap());
+
+    let file = app.get(&path).await;
+    let online = file["fields"].as_array().unwrap().iter().find(|field| field["key"] == "online-mode").unwrap();
+    assert_eq!(online["value"], "true");
+    assert_eq!(online["readOnly"], true);
+    assert!(online["description"].as_str().unwrap().contains("reachable from the internet"));
+
+    let (status, err) = app.call(Method::PUT, &path, Some(json!({ "changes": { "online-mode": "false" } }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(err["error"]["message"].as_str().unwrap().contains("can't be turned off"), "{err}");
+    let (status, _) = app.call(Method::PUT, &path, Some(json!({ "changes": { "motd": "Public" } }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = app.post(&format!("/instances/{id}/actions"), json!({ "action": "start" })).await;
+    assert_eq!(status, StatusCode::OK);
+    app.wait_state(&id, "running").await;
+    let props = std::fs::read_to_string(app.state.paths.instance(&id).join("server.properties")).unwrap();
+    assert!(props.contains("online-mode=true"), "{props}");
+}
+
+#[tokio::test]
+async fn address_names_become_srv_records() {
+    let app = TestApp::new().await;
+    // Without a domain to hang it off, a name can't work yet.
+    let instance = app.create_instance(json!({ "hostname": " Survival " })).await;
+    let id = instance["id"].as_str().unwrap().to_owned();
+    assert_eq!(instance["hostname"], "survival");
+    assert_eq!(instance["dns"]["status"], "unavailable");
+    let port = instance["ports"]["minecraft"].as_u64().unwrap();
+    let direct = |host: &str, port: u64| if port == 25565 { host.to_owned() } else { format!("{host}:{port}") };
+    assert_eq!(instance["address"], direct("localhost", port));
+
+    let (status, _) = app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let path = format!("/instances/{id}");
+    let synced = app.wait_until("the SRV record", |i| i["dns"]["status"] == "synced", &path).await;
+    assert_eq!(synced["address"], "survival.play.example.com");
+    assert_eq!(synced["directAddress"], direct("play.example.com", port));
+    assert_eq!(synced["dns"]["record"], "_minecraft._tcp.survival.play.example.com");
+    assert_eq!(synced["dns"]["value"], format!("0 5 {port} play.example.com"));
+
+    // Names are host-wide and one DNS label.
+    let (status, _) = app
+        .post("/instances", json!({ "name": "x", "newWorld": world_spec("X"), "newProfile": profile_spec("paper", "1.21.4"), "rconPort": free_port(), "hostname": "survival" }))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let other = app.create_instance(json!({ "name": "other" })).await;
+    let other_path = format!("/instances/{}", other["id"].as_str().unwrap());
+    assert!(other["dns"].is_null());
+    let (status, err) = app.call(Method::PATCH, &other_path, Some(json!({ "hostname": "survival" }))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(err["error"]["code"], "hostname_taken");
+    let (status, _) = app.call(Method::PATCH, &other_path, Some(json!({ "hostname": "sky.block" }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A new port moves the record; removing the name removes it.
+    let (status, _) = app.call(Method::PATCH, &path, Some(json!({ "minecraftPort": port + 7 }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let moved = app
+        .wait_until(
+            "the moved record",
+            |i| i["dns"]["status"] == "synced" && i["dns"]["value"].as_str().unwrap().contains(&(port + 7).to_string()),
+            &path,
+        )
+        .await;
+    assert_eq!(moved["address"], "survival.play.example.com");
+    let (status, cleared) = app.call(Method::PATCH, &path, Some(json!({ "hostname": null }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cleared["hostname"].is_null() && cleared["dns"].is_null());
+    assert_eq!(cleared["address"], format!("play.example.com:{}", port + 7));
+    // The freed name can be taken.
+    let (status, _) = app.call(Method::PATCH, &other_path, Some(json!({ "hostname": "survival" }))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn dns_syncs_that_change_nothing_stay_quiet() {
+    let app = TestApp::new().await;
+    // Let the sync at startup finish, then ask for one with nothing to do.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut events = app.state.events.subscribe();
+    app.state.dns.changed();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(events.try_recv().is_err(), "an idle DNS sync announced a change");
+
+    // A sync that creates a record does announce it, so the UI shows it live.
+    // (Creating the instance announces it by id; only the sync sends no id.)
+    app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut events = app.state.events.subscribe();
+    app.create_instance(json!({ "hostname": "quiet" })).await;
+    let mut announced = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        while let Ok(event) = events.try_recv() {
+            let event = serde_json::to_value(event).unwrap();
+            announced |= event["resource"] == "instances" && event["id"].is_null();
+        }
+        if announced {
+            break;
+        }
+    }
+    assert!(announced, "the sync that created a record stayed silent");
+}
+
+#[tokio::test]
+async fn address_names_without_a_dns_provider_are_manual() {
+    let app = TestApp::with(|config| config.dns = lodestone::config::DnsConfig::Manual).await;
+    app.call(Method::PATCH, "/settings", Some(json!({ "publicAddress": "play.example.com" }))).await;
+    let instance = app.create_instance(json!({ "hostname": "creative" })).await;
+    assert_eq!(instance["dns"]["status"], "manual");
+    assert_eq!(instance["address"], "creative.play.example.com");
+    assert!(instance["dns"]["message"].as_str().unwrap().contains("SRV record"));
+}
+
+#[tokio::test]
 async fn settings_and_system() {
     let app = TestApp::new().await;
     let (status, settings) =

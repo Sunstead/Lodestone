@@ -644,6 +644,9 @@ async fn on_output(app: &AppState, slot: &Arc<Slot>, raw: &str) {
 
     let world_id = slot.live.lock().unwrap().world_id.clone();
     if logparse::is_done(&message) {
+        // The world is on disk now. Record that before announcing the server
+        // as running, so anyone who sees "running" also sees it generated.
+        record_world(app, slot).await;
         set_state(app, slot, ServerState::Running);
         on_running(app, slot).await;
     } else if let Some((name, uuid)) = logparse::player_uuid(&message) {
@@ -704,7 +707,9 @@ pub async fn refresh_level(app: &AppState, world_id: &str) {
     }
 }
 
-async fn on_running(app: &AppState, slot: &Arc<Slot>) {
+/// The world has been loaded: it's generated, in this software's layout, and
+/// `level.dat` says which version saved it.
+async fn record_world(app: &AppState, slot: &Arc<Slot>) {
     let world_id = slot.live.lock().unwrap().world_id.clone();
     if let Ok(mut world) = app.store.get_world(&world_id).await {
         let software = slot.live.lock().unwrap().software;
@@ -722,7 +727,10 @@ async fn on_running(app: &AppState, slot: &Arc<Slot>) {
         app.events.changed(ResourceKind::Worlds, Some(world.id));
     }
     refresh_level(app, &world_id).await;
+}
 
+/// RCON and metrics, once the server is up.
+async fn on_running(app: &AppState, slot: &Arc<Slot>) {
     match connect_rcon(slot).await {
         Ok(()) => {
             apply_access_lists(app, slot).await;
@@ -1120,7 +1128,10 @@ pub async fn reconcile(app: &AppState) -> AppResult<()> {
                 set_state(app, &slot, ServerState::Running);
                 tokio::spawn(watch_process(app.clone(), slot.clone(), process.events, process.container_id));
                 let (app, slot) = (app.clone(), slot.clone());
-                tokio::spawn(async move { on_running(&app, &slot).await });
+                tokio::spawn(async move {
+                    record_world(&app, &slot).await;
+                    on_running(&app, &slot).await;
+                });
             }
             Ok(None) => {
                 let profile = app.store.get_profile(&record.profile_id).await?;
